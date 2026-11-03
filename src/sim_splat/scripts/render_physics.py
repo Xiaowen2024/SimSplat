@@ -142,7 +142,8 @@ def main() -> None:
     # The physics-driven actor: a sim asset, or a clone of the target's own Gaussians.
     frames = model.object_to_world.shape[0]
     if asset:
-        moved = meshes_to_gaussians(load_asset(asset["path"], asset["height"]), args.asset_gaussians, train_config.model.sh_degree)
+        moved = (torch.load(asset["gaussians"]) if "gaussians" in asset else
+                 meshes_to_gaussians(load_asset(asset["path"], asset["height"]), args.asset_gaussians, train_config.model.sh_degree))
     else:
         own = model.point_track_indices == track
         moved = {name: parameter.detach()[own].clone() for name, parameter in model.gauss_params.items()}
@@ -208,9 +209,22 @@ def main() -> None:
             # vacated area is old minus new; holes are measured behind the old one.
             original_rows = model.point_track_indices == track
             clone_rows = model.point_track_indices == clone_index
-            before = _object_alpha(model, original_rows, camera) > 0.5
             now = _object_alpha(model, clone_rows, camera) > 0.5
+            if asset:
+                # A replaced object's own Gaussians are near-transparent (baked into the
+                # static field): its original silhouette is the asset at its initial pose.
+                model.object_to_world[:, clone_index] = torch.from_numpy(simulated(0, source)).float().to(device)
+                before = _object_alpha(model, clone_rows, camera) > 0.5
+                model.object_to_world[:, clone_index] = torch.from_numpy(simulated(step, source)).float().to(device)
+            else:
+                before = _object_alpha(model, original_rows, camera) > 0.5
             vacated = before & ~now
+
+            def silhouette_box(mask: torch.Tensor) -> list[float] | None:
+                ys, xs = torch.nonzero(mask, as_tuple=True)
+                return [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)] if len(xs) > 20 else None
+
+            moved_now = simulated(step, source)
             background_alpha = renders["background"]["alpha"][..., 0]
             hole = None
             if before.any():
@@ -221,7 +235,15 @@ def main() -> None:
                     "fraction_alpha_below_0.5": float((background_alpha[before] < 0.5).float().mean()),
                 }
             records.append({"frame": k, "sim_step": step, "source_view": source, "is_real": is_real,
-                            "original_box": original_box, "current_box": current_box, "background_alpha_in_original_box": hole})
+                            "original_box": original_box, "current_box": current_box, "background_alpha_in_original_box": hole,
+                            # Ground truth for perception: tight 2D boxes from silhouettes, 3D centres in this frame's world.
+                            "original_silhouette_box": silhouette_box(before), "current_silhouette_box": silhouette_box(now),
+                            "original_centre": track_poses[source][:3, 3].tolist() if not asset else to_frame(source, poses[0])[:3, 3].tolist(),
+                            "current_centre": moved_now[:3, 3].tolist(), "current_up": moved_now[:3, 2].tolist(),
+                            "ground_z": float(to_frame(source, poses[0])[2, 3] - moved_half[2]),
+                            "camera": {"c2w": camera.c2w.tolist(), "K": camera.K.tolist(), "width": camera.width, "height": camera.height}})
+            for name in ("edited", "original"):
+                np.save(args.output_dir / name / f"{k:04d}_depth.npy", renders[name]["depth"][..., 0].half().cpu().numpy())
 
             # Video frame: original | edited on top, zoomed crops below.
             images = {name: Image.fromarray(_to_uint8(renders[name]["rgb"])) for name in ("original", "edited")}

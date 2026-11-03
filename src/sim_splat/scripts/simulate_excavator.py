@@ -1,8 +1,10 @@
 """Replace a reconstructed actor with a sim asset and let a MuJoCo excavator push it.
 
-The target track (e.g. a barrier) is removed from the scene and a textured
-mesh asset (GLB/OBJ) is placed upright at its location, on the ground under
-its annotation box.  An excavator -- static undercarriage and cab, plus a
+The target track (e.g. a barrier) is removed from the scene and replaced by
+either a textured mesh asset (``--asset``, GLB/OBJ, placed upright on the
+ground under the annotation box) or a look-alike asset built from the
+scene's own photos (``--asset-dir``, from ``build_lookalike_asset.py``,
+placed at its fitted pose with its convex parts as colliders).  An excavator -- static undercarriage and cab, plus a
 boom / stick / bucket arm on three hinge joints driven by position servos --
 sweeps its bucket through the asset along a scripted path (planar two-link
 IK).  The asset is a free body with its convex hull as collider; other
@@ -56,76 +58,94 @@ def _box(name: str, pos, half, rgb, extra: str = "") -> str:
             f'rgba="{rgb[0]} {rgb[1]} {rgb[2]} 1" {extra}/>')
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scene", type=Path, required=True)
-    parser.add_argument("--track", required=True, help="unique prefix of the track to replace")
-    parser.add_argument("--asset", type=Path, required=True, help="GLB/OBJ mesh asset")
-    parser.add_argument("--asset-height", type=float, default=0.95, help="m")
-    parser.add_argument("--asset-mass", type=float, default=15.0, help="kg (traffic drum with ballast)")
-    parser.add_argument("--friction", type=float, default=0.8)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--push-sign", type=float, default=1.0, help="+1 / -1: push along the track box's +x or -x")
-    parser.add_argument("--standoff", type=float, default=3.6, help="excavator base to asset, m")
-    parser.add_argument("--hit-height", type=float, default=0.6, help="bucket centre height / asset height")
-    parser.add_argument("--travel", type=float, default=1.4, help="bucket sweep length, m")
-    parser.add_argument("--speed", type=float, default=1.0, help="bucket sweep speed, m/s")
-    parser.add_argument("--seconds", type=float, default=5.0)
-    parser.add_argument("--fps", type=int, default=24)
-    parser.add_argument("--collider-radius", type=float, default=4.0)
-    args = parser.parse_args()
+class ExcavatorWorld:
+    """MuJoCo world: the asset in place of a track, neighbours as static boxes, and the excavator.
 
-    import mujoco
-    import trimesh
+    Frame E has x along the push direction and z up, with its origin on the
+    ground under the excavator; the asset starts at (standoff, 0).  The arm
+    is commanded by its stick-tip ("wrist") position in E (x, z), through IK
+    and position servos.  ``reset(start)`` sets the arm at a wrist position
+    without dynamics.
+    """
 
-    metadata = parse_scene(load_scene_config(args.scene)).metadata
-    tokens: list[str] = list(metadata["dynamic_track_tokens"])
-    matches = [token for token in tokens if token.startswith(args.track)]
-    if len(matches) != 1:
-        raise ValueError(f"track prefix {args.track!r} matched {len(matches)} tracks")
-    track = tokens.index(matches[0])
-    transforms = metadata["dynamic_object_to_world"].numpy().astype(np.float64)
-    visible = metadata["dynamic_track_visible"].numpy()
-    annotation = transforms[int(np.flatnonzero(visible[:, track])[0]), track]
-    half = np.asarray(metadata["dynamic_track_box_size_xyz"][track], dtype=np.float64) / 2.0
-    ground_z = float(annotation[2, 3] - half[2])
+    PARTS = ("tracks", "cab", "cabin", "boom", "stick", "bucket")
 
-    # Excavator frame E: x = push direction, z up, origin on the ground under
-    # the excavator; the asset stands at (standoff, 0).
-    yaw = _yaw(annotation[:3, :3])
-    direction = np.array((np.cos(yaw), np.sin(yaw), 0.0)) * np.sign(args.push_sign)
-    world_from_e = np.eye(4)
-    world_from_e[:3, :3] = np.stack((direction, np.cross((0, 0, 1), direction), (0, 0, 1)), axis=1)
-    world_from_e[:3, 3] = (*(annotation[:2, 3] - direction[:2] * args.standoff), ground_z)
-    e_from_world = np.linalg.inv(world_from_e)
+    def __init__(self, scene: Path, track: str, *, asset: Path | None = None, asset_dir: Path | None = None,
+                 asset_height: float = 0.95, asset_mass: float = 15.0, friction: float = 0.8, push_sign: float = 1.0,
+                 standoff: float = 3.6, collider_radius: float = 4.0) -> None:
+        import mujoco
+        import trimesh
 
-    meshes = load_asset(args.asset, args.asset_height)
-    hull = trimesh.util.concatenate([trimesh.Trimesh(m.vertices, m.faces, process=False) for m in meshes]).convex_hull
-    if len(hull.vertices) > 400:
-        hull = trimesh.Trimesh(hull.vertices[np.random.default_rng(0).choice(len(hull.vertices), 400, replace=False)]).convex_hull
-    asset_half = (hull.bounds[1] - hull.bounds[0]) / 2.0
+        self.mujoco = mujoco
+        metadata = parse_scene(load_scene_config(scene)).metadata
+        tokens: list[str] = list(metadata["dynamic_track_tokens"])
+        matches = [token for token in tokens if token.startswith(track)]
+        if len(matches) != 1:
+            raise ValueError(f"track prefix {track!r} matched {len(matches)} tracks")
+        self.token = matches[0]
+        index = tokens.index(self.token)
+        transforms = metadata["dynamic_object_to_world"].numpy().astype(np.float64)
+        visible = metadata["dynamic_track_visible"].numpy()
+        annotation = transforms[int(np.flatnonzero(visible[:, index])[0]), index]
+        self.annotation = annotation
+        self.track_half = np.asarray(metadata["dynamic_track_box_size_xyz"][index], dtype=np.float64) / 2.0
+        yaw = _yaw(annotation[:3, :3])
 
-    statics = []
-    for other, token in enumerate(tokens):
-        frames = np.flatnonzero(visible[:, other])
-        if other == track or not len(frames):
-            continue
-        pose = transforms[frames[0], other]
-        if np.linalg.norm(pose[:2, 3] - annotation[:2, 3]) > args.collider_radius:
-            continue
-        local = e_from_world @ pose
-        size = np.asarray(metadata["dynamic_track_box_size_xyz"][other], dtype=np.float64) / 2.0
-        statics.append(f'<geom type="box" pos="{local[0, 3]} {local[1, 3]} {local[2, 3]}" size="{size[0]} {size[1]} {size[2]}" '
-                       f'euler="0 0 {_yaw(local[:3, :3])}" contype="1" conaffinity="1" group="3"/>')
+        # Asset collider parts (local frame, centred) and its first-frame world pose.
+        if asset_dir:
+            info = json.loads((asset_dir / "asset.json").read_text())
+            hulls = [trimesh.load(asset_dir / name, force="mesh").convex_hull for name in info["parts"]]
+            asset_pose = annotation @ np.asarray(info["local_correction"])
+            self.asset_record = {"gaussians": str(asset_dir / "gaussians.pt"), "height": float(info["size_xyz"][2])}
+        else:
+            meshes = load_asset(asset, asset_height)
+            hull = trimesh.util.concatenate([trimesh.Trimesh(m.vertices, m.faces, process=False) for m in meshes]).convex_hull
+            if len(hull.vertices) > 400:
+                hull = trimesh.Trimesh(hull.vertices[np.random.default_rng(0).choice(len(hull.vertices), 400, replace=False)]).convex_hull
+            hulls = [hull]
+            asset_pose = np.eye(4)
+            asset_pose[:3, :3] = np.array(((np.cos(yaw), -np.sin(yaw), 0), (np.sin(yaw), np.cos(yaw), 0), (0, 0, 1)))
+            asset_pose[:3, 3] = (*annotation[:2, 3], annotation[2, 3] - self.track_half[2] + (hull.bounds[1, 2] - hull.bounds[0, 2]) / 2)
+            self.asset_record = {"path": str(asset), "height": asset_height}
+        low = np.min([h.bounds[0] for h in hulls], axis=0)
+        high = np.max([h.bounds[1] for h in hulls], axis=0)
+        self.asset_half = (high - low) / 2.0
+        self.ground_z = float(asset_pose[2, 3] - self.asset_half[2])
+        self.asset_mass = asset_mass
 
-    # contype/conaffinity: arm (2) touches only the asset (1|2); world statics (1) touch only the asset.
-    start = np.array((args.standoff - asset_half[0] - BUCKET[2] - 0.6, args.hit_height * args.asset_height + BUCKET[0] + 1.0))
-    q0 = _ik(start)
-    arm = "contype=\"2\" conaffinity=\"2\""
-    xml = f"""
+        direction = np.array((np.cos(yaw), np.sin(yaw), 0.0)) * np.sign(push_sign)
+        world_from_e = np.eye(4)
+        world_from_e[:3, :3] = np.stack((direction, np.cross((0, 0, 1), direction), (0, 0, 1)), axis=1)
+        world_from_e[:3, 3] = (*(asset_pose[:2, 3] - direction[:2] * standoff), self.ground_z)
+        self.world_from_e = world_from_e
+        e_from_world = np.linalg.inv(world_from_e)
+        asset_in_e = e_from_world @ asset_pose
+        asset_quat = np.zeros(4)
+        mujoco.mju_mat2Quat(asset_quat, asset_in_e[:3, :3].ravel())
+        self.height = 2.0 * self.asset_half[2]
+        self.reach = float(np.abs(asset_in_e[0, :3]) @ self.asset_half)  # asset extent along the push direction
+        self.standoff = standoff
+
+        statics = []
+        for other in range(len(tokens)):
+            frames = np.flatnonzero(visible[:, other])
+            if other == index or not len(frames):
+                continue
+            pose = transforms[frames[0], other]
+            if np.linalg.norm(pose[:2, 3] - annotation[:2, 3]) > collider_radius:
+                continue
+            local = e_from_world @ pose
+            size = np.asarray(metadata["dynamic_track_box_size_xyz"][other], dtype=np.float64) / 2.0
+            statics.append(f'<geom type="box" pos="{local[0, 3]} {local[1, 3]} {local[2, 3]}" size="{size[0]} {size[1]} {size[2]}" '
+                           f'euler="0 0 {_yaw(local[:3, :3])}" contype="1" conaffinity="1" group="3"/>')
+        self.static_colliders = len(statics)
+
+        # contype/conaffinity: arm (2) touches only the asset (1|2); world statics (1) touch only the asset.
+        arm = 'contype="2" conaffinity="2"'
+        xml = f"""
 <mujoco model="excavator_push">
   <option timestep="0.002" integrator="implicitfast" gravity="0 0 -9.81"/>
-  <asset><mesh name="asset" vertex="{' '.join(map(str, hull.vertices.ravel()))}"/></asset>
+  <asset>{''.join(f'<mesh name="asset{i}" vertex="{" ".join(map(str, h.vertices.ravel()))}"/>' for i, h in enumerate(hulls))}</asset>
   <worldbody>
     <geom name="ground" type="plane" size="50 50 0.1" contype="1" conaffinity="1" friction="1 0.005 0.0001"/>
     {''.join(statics)}
@@ -144,10 +164,10 @@ def main() -> None:
         </body>
       </body>
     </body>
-    <body name="asset" pos="{args.standoff} 0 {asset_half[2] + 0.002}">
+    <body name="asset" pos="{asset_in_e[0, 3]} {asset_in_e[1, 3]} {asset_in_e[2, 3] + 0.002}" quat="{' '.join(map(str, asset_quat))}">
       <freejoint/>
-      <geom name="asset" type="mesh" mesh="asset" mass="{args.asset_mass}" friction="{args.friction} 0.005 0.0001"
-            contype="1" conaffinity="3"/>
+      {''.join(f'<geom name="asset{i}" type="mesh" mesh="asset{i}" mass="{asset_mass / len(hulls)}" '
+               f'friction="{friction} 0.005 0.0001" contype="1" conaffinity="3"/>' for i in range(len(hulls)))}
     </body>
   </worldbody>
   <actuator>
@@ -156,15 +176,96 @@ def main() -> None:
     <position joint="bucket" kp="100000" forcerange="-1e6 1e6"/>
   </actuator>
 </mujoco>"""
-    model = mujoco.MjModel.from_xml_string(xml)
-    data = mujoco.MjData(model)
-    joints = [model.joint(name).qposadr[0] for name in ("boom", "stick", "bucket")]
-    data.qpos[joints] = q0
-    data.ctrl[:] = q0
-    mujoco.mj_forward(model, data)
+        self.model = mujoco.MjModel.from_xml_string(xml)
+        self.data = mujoco.MjData(self.model)
+        mujoco.mj_forward(self.model, self.data)  # body poses valid before the first step
+        self.joints = [self.model.joint(name).qposadr[0] for name in ("boom", "stick", "bucket")]
+        self.asset_body = self.model.body("asset").id
+        self.asset_geoms = {self.model.geom(f"asset{i}").id for i in range(len(hulls))}
+        self.bucket_geom = self.model.geom("bucket").id
+        self.part_ids = [self.model.geom(name).id for name in self.PARTS]
+
+    @property
+    def dt(self) -> float:
+        return float(self.model.opt.timestep)
+
+    def reset(self, wrist: np.ndarray) -> None:
+        q = _ik(wrist)
+        self.data.qpos[self.joints] = q
+        self.data.ctrl[:] = q
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def step(self, wrist: np.ndarray) -> None:
+        self.data.ctrl[:] = _ik(wrist)
+        self.mujoco.mj_step(self.model, self.data)
+
+    def _pose(self, position, rotation) -> np.ndarray:
+        local = np.eye(4)
+        local[:3, :3] = np.asarray(rotation).reshape(3, 3)
+        local[:3, 3] = position
+        return self.world_from_e @ local
+
+    def asset_pose(self) -> np.ndarray:
+        return self._pose(self.data.xpos[self.asset_body], self.data.xmat[self.asset_body])
+
+    def part_poses(self) -> list[np.ndarray]:
+        return [self._pose(self.data.geom_xpos[g], self.data.geom_xmat[g]) for g in self.part_ids]
+
+    def touching(self) -> bool:
+        return any(self.bucket_geom in (c.geom1, c.geom2) and ({c.geom1, c.geom2} - {self.bucket_geom}) <= self.asset_geoms
+                   for c in self.data.contact[: self.data.ncon])
+
+    def tracking_error(self) -> float:
+        return float(np.abs(self.data.qpos[self.joints] - self.data.ctrl).max())
+
+    def payload(self, asset_poses: np.ndarray, part_poses: np.ndarray, summary: dict) -> dict:
+        """What ``render_physics.py`` replays: asset and excavator-part poses per video frame."""
+
+        return {
+            **summary,
+            "label": "MuJoCo excavator",
+            "box_half_extent": self.track_half.tolist(),
+            "initial_actor_to_world": torch.from_numpy(self.annotation).float(),
+            "asset": {**self.asset_record, "half_extent": self.asset_half.tolist(), "poses": torch.from_numpy(asset_poses).float()},
+            "parts": [
+                {"name": name, "half_extent": [float(v) for v in self.model.geom_size[g]],
+                 "color": [float(v) for v in self.model.geom_rgba[g][:3]], "poses": torch.from_numpy(part_poses[:, i]).float()}
+                for i, (name, g) in enumerate(zip(self.PARTS, self.part_ids))
+            ],
+        }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--scene", type=Path, required=True)
+    parser.add_argument("--track", required=True, help="unique prefix of the track to replace")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--asset", type=Path, help="GLB/OBJ mesh asset")
+    source.add_argument("--asset-dir", type=Path, help="look-alike asset directory (build_lookalike_asset.py)")
+    parser.add_argument("--asset-height", type=float, default=0.95, help="m")
+    parser.add_argument("--asset-mass", type=float, default=15.0, help="kg (traffic drum with ballast)")
+    parser.add_argument("--friction", type=float, default=0.8)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--push-sign", type=float, default=1.0, help="+1 / -1: push along the track box's +x or -x")
+    parser.add_argument("--standoff", type=float, default=3.6, help="excavator base to asset, m")
+    parser.add_argument("--hit-height", type=float, default=0.6, help="bucket centre height / asset height")
+    parser.add_argument("--travel", type=float, default=1.4, help="bucket sweep length, m")
+    parser.add_argument("--speed", type=float, default=1.0, help="bucket sweep speed, m/s")
+    parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--collider-radius", type=float, default=4.0)
+    args = parser.parse_args()
+
+    import mujoco
+
+    world = ExcavatorWorld(args.scene, args.track, asset=args.asset, asset_dir=args.asset_dir, asset_height=args.asset_height,
+                           asset_mass=args.asset_mass, friction=args.friction, push_sign=args.push_sign,
+                           standoff=args.standoff, collider_radius=args.collider_radius)
+    start = np.array((args.standoff - world.reach - BUCKET[2] - 0.6, args.hit_height * world.height + BUCKET[0] + 1.0))
+    world.reset(start)
 
     # Bucket path (stick tip): lower behind the asset, sweep through it, lift.
-    hit = np.array((start[0] + 0.2, args.hit_height * args.asset_height + BUCKET[0]))
+    hit = np.array((start[0] + 0.2, args.hit_height * world.height + BUCKET[0]))
     sweep = args.travel / args.speed
 
     def wrist(t: float) -> np.ndarray:
@@ -176,67 +277,39 @@ def main() -> None:
         s = min(1.0, t - 1.0 - sweep)
         return hit + np.array((args.travel, 0.9 * (0.5 - 0.5 * np.cos(np.pi * s))))
 
-    asset_body = model.body("asset").id
-    asset_geom, bucket_geom = model.geom("asset").id, model.geom("bucket").id
-    part_names = ["tracks", "cab", "cabin", "boom", "stick", "bucket"]
-    part_ids = [model.geom(name).id for name in part_names]
-
-    def pose(position, rotation) -> np.ndarray:
-        local = np.eye(4)
-        local[:3, :3] = np.asarray(rotation).reshape(3, 3)
-        local[:3, 3] = position
-        return world_from_e @ local
-
-    steps = int(round(args.seconds / model.opt.timestep))
-    every = int(round(1.0 / (args.fps * model.opt.timestep)))
+    steps = int(round(args.seconds / world.dt))
+    every = int(round(1.0 / (args.fps * world.dt)))
     asset_poses, part_poses, contacts, tracking = [], [], [], []
     for step in range(steps + 1):
         if step:
-            data.ctrl[:] = _ik(wrist(step * model.opt.timestep))
-            mujoco.mj_step(model, data)
+            world.step(wrist(step * world.dt))
         if step % every == 0:
-            asset_poses.append(pose(data.xpos[asset_body], data.xmat[asset_body]))
-            part_poses.append([pose(data.geom_xpos[g], data.geom_xmat[g]) for g in part_ids])
-            touching = any({c.geom1, c.geom2} == {asset_geom, bucket_geom} for c in data.contact[: data.ncon])
-            contacts.append(touching)
-            tracking.append(float(np.abs(data.qpos[joints] - data.ctrl).max()))
+            asset_poses.append(world.asset_pose())
+            part_poses.append(world.part_poses())
+            contacts.append(world.touching())
+            tracking.append(world.tracking_error())
 
     asset_poses = np.stack(asset_poses)
     part_poses = np.stack(part_poses)  # [K, parts, 4, 4]
     tilt = float(np.degrees(np.arccos(np.clip(asset_poses[-1][2, 2], -1.0, 1.0))))
     summary = {
-        "track": matches[0],
+        "track": world.token,
         "simulator": f"MuJoCo {mujoco.__version__}",
         "frames": len(asset_poses),
         "fps": args.fps,
-        "asset_path": str(args.asset),
+        "asset": str(args.asset_dir or args.asset),
         "displacement_m": float(np.linalg.norm(asset_poses[-1][:2, 3] - asset_poses[0][:2, 3])),
         "final_tilt_deg": tilt,
         "max_tilt_deg": float(np.degrees(np.arccos(np.clip(asset_poses[:, 2, 2], -1.0, 1.0))).max()),
         "toppled": tilt > 45.0,
         "first_contact_frame": int(np.argmax(contacts)) if any(contacts) else None,
         "max_joint_tracking_error_rad": max(tracking),
-        "static_colliders": len(statics),
-        "ground_z": ground_z,
+        "static_colliders": world.static_colliders,
+        "ground_z": world.ground_z,
         "mass_kg": args.asset_mass,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            **summary,
-            "label": "MuJoCo excavator",
-            "box_half_extent": half.tolist(),
-            "initial_actor_to_world": torch.from_numpy(annotation).float(),
-            "asset": {"path": str(args.asset), "height": args.asset_height, "half_extent": asset_half.tolist(),
-                      "poses": torch.from_numpy(asset_poses).float()},
-            "parts": [
-                {"name": name, "half_extent": [float(v) for v in model.geom_size[g]],
-                 "color": [float(v) for v in model.geom_rgba[g][:3]], "poses": torch.from_numpy(part_poses[:, i]).float()}
-                for i, (name, g) in enumerate(zip(part_names, part_ids))
-            ],
-        },
-        args.output,
-    )
+    torch.save(world.payload(asset_poses, part_poses, summary), args.output)
     print(json.dumps(summary, indent=2))
 
 

@@ -17,6 +17,34 @@ import torch
 from sim_splat.models.sim_splat_model import _rgb_to_sh, _rotation_to_quat_wxyz
 
 
+def procedural_barrier_meshes(size_xyz) -> list:
+    """Plastic water-filled road barrier fitted to an annotation box.
+
+    Local axes follow the track box: x = depth (thin), y = length, z = up,
+    centred on the box.  A slightly tapered body plus a top lip, as two
+    convex parts so a physics engine can use them directly as colliders.
+    Proportions are from the scene-0061 barriers (orange/white units on the
+    kerb): the annotation box includes some margin, so the body is narrower.
+    """
+
+    import trimesh
+
+    depth, length, height = (float(v) for v in size_xyz)
+    body_height = 0.9 * height
+    bottom, top, lip = 0.78 * depth, 0.66 * depth, 0.72 * depth
+    half_length = 0.485 * length
+    z0 = -height / 2
+
+    def prism(profile_xz, y_half):
+        vertices = [(x, y, z) for y in (-y_half, y_half) for x, z in profile_xz]
+        return trimesh.Trimesh(vertices).convex_hull
+
+    body = prism([(-bottom / 2, z0), (bottom / 2, z0), (top / 2, z0 + body_height), (-top / 2, z0 + body_height)], half_length)
+    cap = prism([(-lip / 2, z0 + body_height - 0.04), (lip / 2, z0 + body_height - 0.04), (lip / 2, z0 + height), (-lip / 2, z0 + height)],
+                half_length + 0.01)
+    return [body, cap]
+
+
 def procedural_vehicle_mesh(color: tuple[float, float, float] = (0.95, 0.45, 0.1)):
     """A deliberately synthetic 'sim car': body box + cabin box + four wheels.
 
@@ -135,7 +163,15 @@ def mesh_to_gaussians(
     colors = np.clip(colors * (ambient + (1.0 - ambient) * np.clip(normals @ light, 0.0, 1.0))[:, None], 0.0, 1.0)
 
     # Disc radius from surface area per sample; thin along the normal.
-    radius = math.sqrt(mesh.area / count) * 0.9
+    return surfels_to_gaussians(points, normals, colors, math.sqrt(mesh.area / count) * 0.9, sh_degree, opacity)
+
+
+def surfels_to_gaussians(
+    points: np.ndarray, normals: np.ndarray, colors: np.ndarray, radius: float, sh_degree: int, opacity: float = 0.99
+) -> dict[str, torch.Tensor]:
+    """Flat, opaque discs (z axis = surface normal) in SimSplat parameter layout."""
+
+    count = len(points)
     scales = np.tile(np.log([radius, radius, radius * 0.05]), (count, 1))
     # Rotation whose local z axis is the face normal.
     helper = np.where(np.abs(normals[:, 2:3]) < 0.9, np.array([[0.0, 0.0, 1.0]]), np.array([[1.0, 0.0, 0.0]]))
