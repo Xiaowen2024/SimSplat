@@ -96,7 +96,8 @@ class ExcavatorWorld:
 
     PARTS = ("tracks", "cab", "cabin", "boom", "stick", "bucket")
 
-    def __init__(self, scene: Path, track: str, *, asset: Path | None = None, asset_dir: Path | None = None,
+    def __init__(self, scene: Path, track: str | None, *, asset: Path | None = None, asset_dir: Path | None = None,
+                 site: np.ndarray | None = None,
                  asset_height: float = 0.95, asset_mass: float = 15.0, friction: float = 0.8, push_sign: float = 1.0, push_axis: str = "x",
                  lateral_offset: float = 0.0, standoff: float = 3.6, collider_radius: float = 4.0, neighbour_dirs: list[Path] | tuple = ()) -> None:
         import mujoco
@@ -104,23 +105,40 @@ class ExcavatorWorld:
 
         self.mujoco = mujoco
         metadata = parse_scene(load_scene_config(scene)).metadata
-        tokens: list[str] = list(metadata["dynamic_track_tokens"])
-        matches = [token for token in tokens if token.startswith(track)]
-        if len(matches) != 1:
-            raise ValueError(f"track prefix {track!r} matched {len(matches)} tracks")
-        self.token = matches[0]
-        index = tokens.index(self.token)
-        transforms = metadata["dynamic_object_to_world"].numpy().astype(np.float64)
-        visible = metadata["dynamic_track_visible"].numpy()
-        annotation = transforms[int(np.flatnonzero(visible[:, index])[0]), index]
-        self.annotation = annotation
-        self.track_half = np.asarray(metadata["dynamic_track_box_size_xyz"][index], dtype=np.float64) / 2.0
-        yaw = _yaw(annotation[:3, :3])
+        neighbours = []
+        if track is None:
+            # Site mode (scenes without object annotations): the asset is placed
+            # on the ground at ``site`` (world pose of its bottom centre).
+            if site is None or asset_dir is None:
+                raise ValueError("site mode needs site= and asset_dir=")
+            info = json.loads((asset_dir / "asset.json").read_text())
+            hulls = [trimesh.load(asset_dir / name, force="mesh").convex_hull for name in info["parts"]]
+            asset_pose = np.asarray(site, dtype=np.float64).copy()
+            asset_pose[:3, 3] += asset_pose[:3, 2] * info["size_xyz"][2] / 2.0
+            self.token, tokens, index = None, [], -1
+            self.annotation = asset_pose
+            self.track_half = np.asarray(info["size_xyz"], dtype=np.float64) / 2.0
+            yaw = _yaw(asset_pose[:3, :3])
+            annotation = asset_pose
+            self.asset_record = {"gaussians": str(asset_dir / "gaussians.pt"), "height": float(info["size_xyz"][2]),
+                                 "initial_pose": torch.from_numpy(asset_pose).float()}
+        else:
+            tokens = list(metadata["dynamic_track_tokens"])
+            matches = [token for token in tokens if token.startswith(track)]
+            if len(matches) != 1:
+                raise ValueError(f"track prefix {track!r} matched {len(matches)} tracks")
+            self.token = matches[0]
+            index = tokens.index(self.token)
+            transforms = metadata["dynamic_object_to_world"].numpy().astype(np.float64)
+            visible = metadata["dynamic_track_visible"].numpy()
+            annotation = transforms[int(np.flatnonzero(visible[:, index])[0]), index]
+            self.annotation = annotation
+            self.track_half = np.asarray(metadata["dynamic_track_box_size_xyz"][index], dtype=np.float64) / 2.0
+            yaw = _yaw(annotation[:3, :3])
+            first = int(np.flatnonzero(visible[:, index])[0])
 
         # Asset collider parts (local frame, centred) and its first-frame world pose.
-        first = int(np.flatnonzero(visible[:, index])[0])
-        neighbours = []
-        if asset_dir:
+        if track is not None and asset_dir:
             info = json.loads((asset_dir / "asset.json").read_text())
             hulls = [trimesh.load(asset_dir / name, force="mesh").convex_hull for name in info["parts"]]
             target_poses = asset_poses(transforms[:, index], info)
@@ -146,7 +164,7 @@ class ExcavatorWorld:
                 neighbours.append({"token": other_info["track"], "track": other, "pose": pose, "dir": str(path),
                                    "hulls": [trimesh.load(Path(path) / name, force="mesh").convex_hull for name in other_info["parts"]],
                                    "half": np.asarray(other_info["size_xyz"]) / 2.0})
-        else:
+        elif track is not None:
             meshes = load_asset(asset, asset_height)
             hull = trimesh.util.concatenate([trimesh.Trimesh(m.vertices, m.faces, process=False) for m in meshes]).convex_hull
             if len(hull.vertices) > 400:

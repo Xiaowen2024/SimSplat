@@ -140,8 +140,9 @@ def main() -> None:
                                       "color": (0.95, 0.72, 0.08), "poses": physics["pusher_to_world"]}]
     label = physics.get("label", "sim bucket")
     initial = physics["initial_actor_to_world"].numpy().astype(np.float64)
-    target = physics["track"]
-    track = model.track_tokens.index(target)
+    target = physics["track"]  # None: site mode (the asset was added to a scene without annotations)
+    track = model.track_tokens.index(target) if target is not None else None
+    clone_token = f"physics:{target if target is not None else 'site'}"
 
     # The physics-driven actor: a sim asset, or a clone of the target's own Gaussians.
     frames = model.object_to_world.shape[0]
@@ -149,11 +150,11 @@ def main() -> None:
         moved = (torch.load(asset["gaussians"]) if "gaussians" in asset else
                  meshes_to_gaussians(load_asset(asset["path"], asset["height"]), args.asset_gaussians, train_config.model.sh_degree))
     else:
-        own = model.point_track_indices == track
+        own = model.point_track_indices == (track if track is not None else -2)
         moved = {name: parameter.detach()[own].clone() for name, parameter in model.gauss_params.items()}
     still = torch.from_numpy(initial).float().expand(frames, 4, 4).clone()
     everywhere = torch.ones((frames,), dtype=torch.bool)
-    clone_index = model.add_actor(f"physics:{target}", moved, still, everywhere)
+    clone_index = model.add_actor(clone_token, moved, still, everywhere)
     part_indices = []
     for i, part in enumerate(parts):
         gaussians = _box_mesh_gaussians(part["half_extent"], tuple(part["color"]), train_config.model.sh_degree)
@@ -163,7 +164,7 @@ def main() -> None:
     neighbours = physics.get("neighbours") or []
     neighbour_indices = [model.add_actor(f"physics:nb:{item['token'][:8]}", torch.load(item["gaussians"]), still, everywhere)
                          for item in neighbours]
-    physics_tokens = [f"physics:{target}", *(f"physics:nb:{item['token'][:8]}" for item in neighbours)]
+    physics_tokens = [clone_token, *(f"physics:nb:{item['token'][:8]}" for item in neighbours)]
     # Look-alike assets that are not simulated stay where they are (the background
     # was inpainted with all of them removed).
     from sim_splat.scripts.build_lookalike_asset import asset_poses as look_alike_poses
@@ -179,13 +180,16 @@ def main() -> None:
             model.add_actor(f"static:{info['track'][:8]}", torch.load(path.parent / "gaussians.pt"),
                             torch.from_numpy(look_alike_poses(own, info)).float(), everywhere)
             static_tokens.append(info["track"])
-    hidden_tracks = [target, *(item["token"] for item in neighbours), *static_tokens]
+    hidden_tracks = [token for token in (target, *(item["token"] for item in neighbours), *static_tokens) if token is not None]
 
     # nuScenes annotations of a static object can drift between frames
     # (measured: 0.86 m in z for this barrier, since ego poses carry no real
     # elevation).  The reconstruction was fitted to each frame's own pose, so
     # physics is applied as a *relative* motion on top of that pose.
-    track_poses = model.object_to_world[:, track].detach().cpu().numpy().astype(np.float64)
+    if track is None:  # site mode: the simulation world is the scene's world in every frame
+        track_poses = np.repeat(initial[None], frames, axis=0)
+    else:
+        track_poses = model.object_to_world[:, track].detach().cpu().numpy().astype(np.float64)
     initial_inverse = np.linalg.inv(initial)
 
     anchor = track_poses @ initial_inverse  # frame f's world <- simulation world
@@ -309,7 +313,7 @@ def main() -> None:
             for name, hidden in (
                 # With look-alike neighbours the background has all of them removed:
                 # "original" is the simulated scene before anything moved.
-                ("original", [f"physics:{target}", *sim_tokens, *hidden_tracks] if neighbours else [*physics_tokens, *sim_tokens]),
+                ("original", [clone_token, *sim_tokens, *hidden_tracks] if neighbours else [*physics_tokens, *sim_tokens]),
                 ("edited", hidden_tracks),
                 ("background", [*hidden_tracks, *physics_tokens, *sim_tokens]),
             ):
@@ -335,7 +339,7 @@ def main() -> None:
             current_box = _project_box(simulated(step, source), moved_half, camera)
             # Silhouettes of the object at its original and current pose: the
             # vacated area is old minus new; holes are measured behind the old one.
-            original_rows = model.point_track_indices == track
+            original_rows = model.point_track_indices == (track if track is not None else -2)
             clone_rows = model.point_track_indices == clone_index
             now = _object_alpha(model, clone_rows, camera) > 0.5
             if asset:

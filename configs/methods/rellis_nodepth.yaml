@@ -1,0 +1,41 @@
+# As rellis.yaml without LiDAR depth supervision (the control).
+experiment_name: rellis_00001_nodepth
+max_steps: 30000
+seed: 42
+device: cuda
+output_dir: outputs
+eval_every: 2500
+save_every: 100000
+log_every: 500
+densify: true
+model:
+  sh_degree: 3
+  init_opacity: 0.1
+  init_scale_multiplier: 1.0
+  init_knn_k: 4
+  ssim_lambda: 0.2
+  max_gauss_ratio: 10.0
+  sky: true
+  sky_resolution: [128, 256]
+  appearance_affine: true
+  depth_loss_weight: 0.0
+optimizer:
+  means_lr: 0.00016
+  scales_lr: 0.005
+  quats_lr: 0.001
+  opacities_lr: 0.05
+  features_dc_lr: 0.0025
+  features_rest_lr: 0.000125
+  final_lr_ratio: 0.01
+  sky_lr: 0.01
+  appearance_lr: 0.0005
+densification:
+  max_gaussians: 2500000
+  max_new_per_refine: 150000
+  start_step: 500
+  stop_step: 15000
+  every: 100
+  reset_every: 3000
+  grow_grad2d: 0.0002
+  prune_opacity: 0.005
+  revised_opacity: false

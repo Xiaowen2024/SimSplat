@@ -1,0 +1,5 @@
+# RELLIS-3D sequence 00001, frames 0-599 every 2nd (off-road trail with mud), written by:
+#   python -m sim_splat.scripts.convert_rellis --sequence <rellis>/00001 --output data/scenes/rellis_00001 --frames 0 600 --stride 2
+name: rellis-00001
+data: data/scenes/rellis_00001
+dataparser: scene

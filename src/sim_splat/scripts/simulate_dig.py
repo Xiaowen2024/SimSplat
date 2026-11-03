@@ -61,11 +61,27 @@ def _lidar_ground(scene_path: Path, world_from_e: np.ndarray, soil: SoilField) -
     return heights, int(ground.sum())
 
 
+def _ground_height(scene_path: Path, x: float, y: float, radius: float = 1.5) -> float:
+    """Ground height under (x, y): low percentile of static LiDAR seeds nearby."""
+
+    scene = parse_scene(load_scene_config(scene_path))
+    points = scene.points_xyz.numpy().astype(np.float64)
+    near = points[np.hypot(points[:, 0] - x, points[:, 1] - y) < radius]
+    if len(near) < 10:
+        raise ValueError(f"too few LiDAR points near ({x}, {y}) to find the ground")
+    return float(np.percentile(near[:, 2], 20))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scene", type=Path, required=True)
-    parser.add_argument("--track", required=True, help="barrier that marks the work zone (look-alike asset)")
-    parser.add_argument("--asset-dir", type=Path, required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--track", help="barrier that marks the work zone (look-alike asset)")
+    target.add_argument("--site", type=float, nargs=3, metavar=("X", "Y", "YAW_DEG"),
+                        help="scenes without annotations: put a barrier here (world x, y; ground height from LiDAR) "
+                             "and work in front of it")
+    parser.add_argument("--asset-dir", type=Path, required=True, help="look-alike asset, or (with --site) an authored one "
+                                                                       "(created with assets.write_procedural_barrier if missing)")
     parser.add_argument("--asset-root", type=Path, help="other look-alike assets as rigid bodies")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lateral-offset", type=float, default=0.0)
@@ -82,7 +98,17 @@ def main() -> None:
     import mujoco
 
     neighbours = sorted(path.parent for path in args.asset_root.glob("*/asset.json")) if args.asset_root else ()
-    world = ExcavatorWorld(args.scene, args.track, asset_dir=args.asset_dir, asset_mass=60.0, push_sign=-1.0,
+    site = None
+    if args.site:
+        if not (args.asset_dir / "asset.json").is_file():
+            from sim_splat.assets import write_procedural_barrier
+
+            write_procedural_barrier(args.asset_dir)
+        x, y, yaw = args.site
+        site = np.eye(4)
+        site[:3, :3] = np.array(((np.cos(np.radians(yaw)), -np.sin(np.radians(yaw)), 0), (np.sin(np.radians(yaw)), np.cos(np.radians(yaw)), 0), (0, 0, 1)))
+        site[:3, 3] = (x, y, _ground_height(args.scene, x, y))
+    world = ExcavatorWorld(args.scene, args.track, asset_dir=args.asset_dir, site=site, asset_mass=60.0, push_sign=-1.0,
                            lateral_offset=args.lateral_offset, standoff=args.standoff, neighbour_dirs=neighbours)
     soil = SoilField.flat((args.trench[0] - 0.5, max(args.trench[1], args.dump_x) + 0.8), (-1.2, 1.2), 0.05, capacity_m3=args.capacity)
     heights, ground_points = _lidar_ground(args.scene, world.world_from_e, soil)
@@ -147,7 +173,7 @@ def main() -> None:
     neighbour_poses = np.stack(frames["neighbours"]) if world.neighbours else None
     dug = soil.heights < soil.initial - 0.01
     summary = {
-        "track": world.token, "simulator": f"MuJoCo {mujoco.__version__}", "frames": len(asset_poses), "fps": args.fps,
+        "track": world.token, "site": args.site, "simulator": f"MuJoCo {mujoco.__version__}", "frames": len(asset_poses), "fps": args.fps,
         "passes": args.passes, "trench_depth_m": float((soil.initial - soil.heights).max()),
         "trench_area_m2": float(dug.sum() * soil.cell_area), "excavated_m3": float(-np.minimum(soil.heights - soil.initial, 0).sum() * soil.cell_area),
         "spoil_m3": float(np.maximum(soil.heights - soil.initial, 0).sum() * soil.cell_area),

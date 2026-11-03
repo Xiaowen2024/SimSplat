@@ -189,3 +189,39 @@ def surfels_to_gaussians(
         "features_dc": _rgb_to_sh(torch.from_numpy(colors).float()),
         "features_rest": torch.zeros((count, bases - 1, 3)),
     }
+
+
+def write_procedural_barrier(output_dir, size_xyz=(0.55, 1.95, 1.0), surfels: int = 40000, sh_degree: int = 3) -> dict:
+    """An authored (not photo-textured) barrier asset in the look-alike asset layout.
+
+    For scenes without the object (e.g. an off-road capture where we *add*
+    construction equipment): orange plastic body with vertical ribs and a
+    white top lip, matte-shaded.  Writes ``part_*.obj``, ``gaussians.pt``
+    and ``asset.json`` like ``build_lookalike_asset.py``.
+    """
+
+    import json
+    from pathlib import Path
+
+    import trimesh
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    size = np.asarray(size_xyz, dtype=np.float64)
+    parts = procedural_barrier_meshes(size)
+    mesh = trimesh.util.concatenate(parts)
+    points, faces = trimesh.sample.sample_surface(mesh, surfels, seed=0)
+    normals = mesh.face_normals[faces]
+    orange, white = np.array((0.86, 0.36, 0.16)), np.array((0.86, 0.85, 0.80))
+    ribs = 0.88 + 0.12 * np.cos(points[:, 1] / (size[1] / 6) * 2 * np.pi)  # moulded vertical ribs
+    lip = points[:, 2] > size[2] / 2 - 0.1 * size[2]
+    colours = np.where(lip[:, None], white, orange * ribs[:, None])
+    colours *= (0.75 + 0.25 * np.clip(normals[:, 2:3] + 0.5, 0, 1))  # soft top light
+    radius = float(np.sqrt(mesh.area / surfels) * 0.9)
+    torch.save(surfels_to_gaussians(points, normals, np.clip(colours, 0, 1), radius, sh_degree), output_dir / "gaussians.pt")
+    for i, part in enumerate(parts):
+        part.export(output_dir / f"part_{i}.obj")
+    info = {"track": None, "category": "authored.barrier", "size_xyz": size.tolist(), "local_correction": np.eye(4).tolist(),
+            "parts": [f"part_{i}.obj" for i in range(len(parts))], "source": "procedural"}
+    (output_dir / "asset.json").write_text(json.dumps(info, indent=1))
+    return info
