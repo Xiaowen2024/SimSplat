@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sim-splat"
+version = "0.1.0"
+description = "Editable 3D Gaussian Splatting scene graphs for simulation, built directly on gsplat"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10",
+  "PyYAML>=6",
+  "scipy>=1.10",
+  "torch>=2.1",
+  "gsplat>=1.4",
+  "pycolmap>=3.10",
+]
+
+[project.optional-dependencies]
+# Mesh assets for actor replacement and mp4 export in render_edit.
+edit = ["trimesh>=4", "opencv-python-headless>=4.8"]
+# Grounding DINO / SAM masks for lifting objects out of static scenes.
+masking = ["transformers>=4.46,<5", "safetensors>=0.4"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+sim-splat-train = "sim_splat.scripts.train:main"
+sim-splat-eval = "sim_splat.scripts.eval:main"
+sim-splat-render-edit = "sim_splat.scripts.render_edit:main"
+sim-splat-convert-nuscenes = "sim_splat.scripts.convert_nuscenes:main"
+sim-splat-convert-colmap = "sim_splat.scripts.convert_colmap:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

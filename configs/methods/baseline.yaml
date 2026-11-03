@@ -1,0 +1,25 @@
+experiment_name: church_standalone_baseline
+max_steps: 30000
+seed: 42
+device: cuda
+output_dir: outputs
+eval_every: 1000
+save_every: 5000
+densify: true
+model:
+  sh_degree: 3
+  init_opacity: 0.1
+  init_scale_multiplier: 1.0
+  init_knn_k: 4
+  ssim_lambda: 0.2
+  static_mask_loss_weight: 1.0
+  use_scale_regularization: false
+  max_gauss_ratio: 10.0
+optimizer:
+  means_lr: 0.00016
+  scales_lr: 0.005
+  quats_lr: 0.001
+  opacities_lr: 0.05
+  features_dc_lr: 0.0025
+  features_rest_lr: 0.000125
+  eps: 1.0e-15

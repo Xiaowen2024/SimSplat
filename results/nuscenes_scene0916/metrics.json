@@ -1,0 +1,258 @@
+{
+ "mean": {
+  "v1_psnr": 18.762,
+  "v1_ssim": 0.612,
+  "v2_psnr": 21.642,
+  "v2_ssim": 0.718
+ },
+ "views": [
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984233504844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 21.06,
+   "v1_ssim": 0.647,
+   "v2_psnr": 21.64,
+   "v2_ssim": 0.713
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984234020339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 18.61,
+   "v1_ssim": 0.673,
+   "v2_psnr": 21.69,
+   "v2_ssim": 0.755
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984234537525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 23.0,
+   "v1_ssim": 0.774,
+   "v2_psnr": 25.74,
+   "v2_ssim": 0.853
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984235404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 24.28,
+   "v1_ssim": 0.731,
+   "v2_psnr": 24.35,
+   "v2_ssim": 0.792
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984235920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 18.97,
+   "v1_ssim": 0.645,
+   "v2_psnr": 21.18,
+   "v2_ssim": 0.736
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984236437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 24.27,
+   "v1_ssim": 0.791,
+   "v2_psnr": 25.99,
+   "v2_ssim": 0.856
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984237404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 14.8,
+   "v1_ssim": 0.559,
+   "v2_psnr": 20.37,
+   "v2_ssim": 0.703
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984237920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 17.62,
+   "v1_ssim": 0.487,
+   "v2_psnr": 20.42,
+   "v2_ssim": 0.619
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984238437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 24.58,
+   "v1_ssim": 0.782,
+   "v2_psnr": 24.91,
+   "v2_ssim": 0.842
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984239404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 15.24,
+   "v1_ssim": 0.447,
+   "v2_psnr": 17.41,
+   "v2_ssim": 0.564
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984239920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 17.91,
+   "v1_ssim": 0.503,
+   "v2_psnr": 20.37,
+   "v2_ssim": 0.6
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984240437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 20.18,
+   "v1_ssim": 0.732,
+   "v2_psnr": 23.4,
+   "v2_ssim": 0.804
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984241404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 17.33,
+   "v1_ssim": 0.561,
+   "v2_psnr": 19.52,
+   "v2_ssim": 0.677
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984241920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 18.14,
+   "v1_ssim": 0.508,
+   "v2_psnr": 20.61,
+   "v2_ssim": 0.61
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984242437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 22.14,
+   "v1_ssim": 0.741,
+   "v2_psnr": 24.12,
+   "v2_ssim": 0.801
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984243404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 14.52,
+   "v1_ssim": 0.453,
+   "v2_psnr": 17.38,
+   "v2_ssim": 0.598
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984243920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 17.57,
+   "v1_ssim": 0.472,
+   "v2_psnr": 20.8,
+   "v2_ssim": 0.609
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984244437534.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 20.57,
+   "v1_ssim": 0.712,
+   "v2_psnr": 23.65,
+   "v2_ssim": 0.804
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984245404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 15.58,
+   "v1_ssim": 0.498,
+   "v2_psnr": 18.52,
+   "v2_ssim": 0.631
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984245920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 17.67,
+   "v1_ssim": 0.567,
+   "v2_psnr": 21.17,
+   "v2_ssim": 0.719
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984246437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 20.24,
+   "v1_ssim": 0.713,
+   "v2_psnr": 23.37,
+   "v2_ssim": 0.8
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984247404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 15.32,
+   "v1_ssim": 0.587,
+   "v2_psnr": 19.45,
+   "v2_ssim": 0.723
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984247920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 19.22,
+   "v1_ssim": 0.567,
+   "v2_psnr": 24.12,
+   "v2_ssim": 0.751
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984248437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 20.24,
+   "v1_ssim": 0.74,
+   "v2_psnr": 25.05,
+   "v2_ssim": 0.821
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984249404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 13.42,
+   "v1_ssim": 0.414,
+   "v2_psnr": 17.05,
+   "v2_ssim": 0.576
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984249920351.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 18.7,
+   "v1_ssim": 0.538,
+   "v2_psnr": 22.9,
+   "v2_ssim": 0.7
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984250437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 22.37,
+   "v1_ssim": 0.745,
+   "v2_psnr": 24.48,
+   "v2_ssim": 0.814
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984251404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 15.86,
+   "v1_ssim": 0.528,
+   "v2_psnr": 18.52,
+   "v2_ssim": 0.61
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_RIGHT__1538984251920339.png",
+   "camera": "CAM_FRONT_RIGHT",
+   "v1_psnr": 18.93,
+   "v1_ssim": 0.578,
+   "v2_psnr": 21.77,
+   "v2_ssim": 0.689
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_BACK__1538984252437525.png",
+   "camera": "CAM_BACK",
+   "v1_psnr": 19.5,
+   "v1_ssim": 0.726,
+   "v2_psnr": 23.25,
+   "v2_ssim": 0.814
+  },
+  {
+   "image": "n015-2018-10-08-15-36-50+0800__CAM_FRONT_LEFT__1538984253404844.png",
+   "camera": "CAM_FRONT_LEFT",
+   "v1_psnr": 13.79,
+   "v1_ssim": 0.564,
+   "v2_psnr": 17.71,
+   "v2_ssim": 0.664
+  }
+ ]
+}

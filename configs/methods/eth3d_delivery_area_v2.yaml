@@ -1,0 +1,36 @@
+# Static ETH3D delivery_area reconstruction with the fixed (Gaussian-window)
+# SSIM and standard 3DGS schedule; base for lifting the trolley into an actor.
+experiment_name: eth3d_delivery_area_v2
+max_steps: 15000
+seed: 42
+device: cuda
+output_dir: outputs
+eval_every: 2500
+save_every: 5000
+log_every: 500
+densify: true
+model:
+  sh_degree: 3
+  init_opacity: 0.1
+  init_scale_multiplier: 1.0
+  init_knn_k: 4
+  ssim_lambda: 0.2
+  max_gauss_ratio: 10.0
+optimizer:
+  means_lr: 0.00016
+  scales_lr: 0.005
+  quats_lr: 0.001
+  opacities_lr: 0.05
+  features_dc_lr: 0.0025
+  features_rest_lr: 0.000125
+  final_lr_ratio: 0.01
+densification:
+  max_gaussians: 2000000
+  max_new_per_refine: 100000
+  start_step: 500
+  stop_step: 10000
+  every: 100
+  reset_every: 3000
+  grow_grad2d: 0.0002
+  prune_opacity: 0.005
+  revised_opacity: false

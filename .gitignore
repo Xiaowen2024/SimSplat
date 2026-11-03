@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Data, runs and checkpoints stay outside version control.
+/data/
+/outputs/
+*.pt
+*.pth
+*.ckpt
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/

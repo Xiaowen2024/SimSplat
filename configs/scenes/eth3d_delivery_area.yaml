@@ -1,0 +1,10 @@
+name: eth3d-delivery-area-4x
+data: data/eth3d/delivery_area_4x
+dataparser: colmap
+images_path: images
+colmap_path: sparse
+eval_interval: 6
+max_init_points: 0
+normalize_world_space: true
+calibration_policy: preserve
+unsupported_model_policy: error

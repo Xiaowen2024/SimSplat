@@ -1,0 +1,10 @@
+name: church
+data: data/tanks_and_temples/church/raw/church
+dataparser: colmap
+images_path: images_2
+colmap_path: sparse_resized
+masks_path: null
+eval_interval: 8
+# Church is only a validation scene; calibration remains per-camera.
+calibration_policy: preserve
+unsupported_model_policy: error

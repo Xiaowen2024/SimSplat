@@ -1,0 +1,4 @@
+# Generic scene directory written by configs/convert/nuscenes_scene0916_drivinggaussian.yaml
+name: nuscenes-scene-0916-drivinggaussian
+data: data/scenes/nuscenes_scene0916_drivinggaussian
+dataparser: scene
