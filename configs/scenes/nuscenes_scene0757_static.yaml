@@ -1,0 +1,4 @@
+# Generic scene directory written by configs/convert/nuscenes_scene0757_static.yaml
+name: nuscenes-scene-0757-static
+data: data/scenes/nuscenes_scene0757_static
+dataparser: scene

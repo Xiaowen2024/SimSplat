@@ -1,0 +1,21 @@
+# nuScenes -> SimSplat scene conversion (run once):
+#   python -m sim_splat.scripts.convert_nuscenes --config configs/convert/nuscenes_scene0103_static.yaml \
+#       --output data/scenes/nuscenes_scene0103_static
+# Busy street, many pedestrians, cyclist, six surround cameras.
+name: nuscenes-scene-0103-static
+data: data/nuscenes
+scene_name: scene-0103
+camera_channels: [CAM_FRONT, CAM_FRONT_RIGHT, CAM_BACK_RIGHT, CAM_BACK, CAM_BACK_LEFT, CAM_FRONT_LEFT]
+use_sweeps: true
+sweep_stride: 2
+image_downscale: 2
+eval_interval: 8
+max_init_points: 800000
+lidar_voxel_size: 0.08
+object_voxel_size: 0.04
+ego_radius: 2.5
+box_margin: 0.15
+object_random_seeds: 300
+dynamic_categories: []  # vanilla 3DGS baseline: everything is static
+# The rear camera sees the ego trunk (~6% of rows at the bottom).
+ego_mask_bottom_fraction: {CAM_BACK: 0.06}

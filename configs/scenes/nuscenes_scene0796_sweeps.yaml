@@ -1,0 +1,4 @@
+# Generic scene directory written by configs/convert/nuscenes_scene0796_sweeps.yaml
+name: nuscenes-scene-0796-sweeps
+data: data/scenes/nuscenes_scene0796_sweeps
+dataparser: scene

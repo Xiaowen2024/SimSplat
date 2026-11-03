@@ -1,9 +1,15 @@
 """Replay a physics simulation inside a trained scene along a smooth camera path.
 
-The pushed object is the actor's *own* reconstructed Gaussians: they are
-cloned into a new actor (``add_actor``) whose pose row is overwritten with the
-simulated pose every video frame.  The original track is hidden in the edited
-render, and the simulated bucket is rendered as a mesh asset.
+Two kinds of simulation output are accepted:
+
+* ``simulate_push.py`` (PyBullet): the pushed object is the actor's *own*
+  reconstructed Gaussians, cloned into a new actor (``add_actor``) whose pose
+  row is overwritten with the simulated pose every video frame;
+* ``simulate_excavator.py`` (MuJoCo): the actor is *replaced* by a textured
+  mesh asset, sampled into Gaussians and posed the same way.
+
+Either way the original track is hidden in the edited render and the
+simulator's own bodies (bucket, excavator links) are rendered as box assets.
 
 Outputs: ``original/``, ``edited/``, ``background/``, ``real/`` frames,
 ``meta.json`` (per-frame projected boxes and hole statistics), ``push.mp4``
@@ -22,7 +28,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from sim_splat.assets import mesh_to_gaussians
+from sim_splat.assets import load_asset, mesh_to_gaussians, meshes_to_gaussians
 from sim_splat.config import load_scene_config, load_train_config
 from sim_splat.data.dataparsers import parse_scene
 from sim_splat.data.input_dataset import InputDataset
@@ -111,6 +117,7 @@ def main() -> None:
     parser.add_argument("--num-views", type=int, default=4, help="captured views auto-selected for the path")
     parser.add_argument("--hold", type=int, default=24, help="extra still frames after the simulation ends")
     parser.add_argument("--zoom", type=float, default=3.0)
+    parser.add_argument("--asset-gaussians", type=int, default=60000)
     args = parser.parse_args()
 
     scene = parse_scene(load_scene_config(args.scene))
@@ -121,22 +128,32 @@ def main() -> None:
     model.eval()
     model.set_step(10**9)
     physics = torch.load(args.physics, map_location="cpu", weights_only=False)
-    poses = physics["actor_to_world"].numpy().astype(np.float64)
-    pusher_poses = physics["pusher_to_world"]
+    asset = physics.get("asset")
+    poses = (asset["poses"] if asset else physics["actor_to_world"]).numpy().astype(np.float64)
     half = np.asarray(physics["box_half_extent"], dtype=np.float64)
+    moved_half = np.asarray(asset["half_extent"], dtype=np.float64) if asset else half
+    parts = physics.get("parts") or [{"name": "bucket", "half_extent": physics["pusher_half_extent"],
+                                      "color": (0.95, 0.72, 0.08), "poses": physics["pusher_to_world"]}]
+    label = physics.get("label", "sim bucket")
     initial = physics["initial_actor_to_world"].numpy().astype(np.float64)
     target = physics["track"]
     track = model.track_tokens.index(target)
 
-    # Clone the target's own Gaussians into a physics-driven actor, and add the bucket.
+    # The physics-driven actor: a sim asset, or a clone of the target's own Gaussians.
     frames = model.object_to_world.shape[0]
-    own = model.point_track_indices == track
-    clone = {name: parameter.detach()[own].clone() for name, parameter in model.gauss_params.items()}
+    if asset:
+        moved = meshes_to_gaussians(load_asset(asset["path"], asset["height"]), args.asset_gaussians, train_config.model.sh_degree)
+    else:
+        own = model.point_track_indices == track
+        moved = {name: parameter.detach()[own].clone() for name, parameter in model.gauss_params.items()}
     still = torch.from_numpy(initial).float().expand(frames, 4, 4).clone()
     everywhere = torch.ones((frames,), dtype=torch.bool)
-    clone_index = model.add_actor(f"physics:{target}", clone, still, everywhere)
-    bucket = _box_mesh_gaussians(physics["pusher_half_extent"], (0.95, 0.72, 0.08), train_config.model.sh_degree)
-    bucket_index = model.add_actor("bucket", bucket, pusher_poses[0].expand(frames, 4, 4).clone(), everywhere)
+    clone_index = model.add_actor(f"physics:{target}", moved, still, everywhere)
+    part_indices = []
+    for i, part in enumerate(parts):
+        gaussians = _box_mesh_gaussians(part["half_extent"], tuple(part["color"]), train_config.model.sh_degree)
+        part_indices.append(model.add_actor(f"sim:{i}:{part['name']}", gaussians, part["poses"][0].expand(frames, 4, 4).clone(), everywhere))
+    sim_tokens = [f"sim:{i}:{part['name']}" for i, part in enumerate(parts)]
 
     # nuScenes annotations of a static object can drift between frames
     # (measured: 0.86 m in z for this barrier, since ego poses carry no real
@@ -170,12 +187,13 @@ def main() -> None:
         for k, (camera, source) in enumerate(path):
             step = min(k, sim_frames - 1)
             model.object_to_world[:, clone_index] = torch.from_numpy(simulated(step, source)).float().to(device)
-            model.object_to_world[:, bucket_index] = torch.from_numpy(to_frame(source, pusher_poses[step].numpy().astype(np.float64))).float().to(device)
+            for part, index in zip(parts, part_indices):
+                model.object_to_world[:, index] = torch.from_numpy(to_frame(source, part["poses"][step].numpy().astype(np.float64))).float().to(device)
             renders = {}
             for name, hidden in (
-                ("original", [f"physics:{target}", "bucket"]),
+                ("original", [f"physics:{target}", *sim_tokens]),
                 ("edited", [target]),
-                ("background", [target, f"physics:{target}", "bucket"]),
+                ("background", [target, f"physics:{target}", *sim_tokens]),
             ):
                 model.set_hidden_tracks(hidden)
                 out = model.get_outputs(camera)
@@ -185,7 +203,7 @@ def main() -> None:
             if is_real:
                 Image.fromarray(_to_uint8(dataset[source].image)).save(args.output_dir / "real" / f"{k:04d}.png")
             original_box = _project_box(track_poses[source], half, camera)
-            current_box = _project_box(simulated(step, source), half, camera)
+            current_box = _project_box(simulated(step, source), moved_half, camera)
             # Silhouettes of the object at its original and current pose: the
             # vacated area is old minus new; holes are measured behind the old one.
             original_rows = model.point_track_indices == track
@@ -211,7 +229,7 @@ def main() -> None:
             centre = ((focus[0] + focus[2]) / 2, (focus[1] + focus[3]) / 2)
             canvas = Image.new("RGB", (2 * width, 2 * height))
             for column, name in enumerate(("original", "edited")):
-                label = "original scene" if name == "original" else f"pushed by sim bucket  t={step / physics['fps']:.2f}s"
+                label = "original scene" if name == "original" else f"{label}  t={step / physics['fps']:.2f}s"
                 canvas.paste(_labelled(np.asarray(images[name]), label), (column * width, 0))
                 canvas.paste(_crop(images[name], centre, crop_size, (width, height)), (column * width, height))
             video_frames.append(canvas)
@@ -243,7 +261,9 @@ def main() -> None:
         collage.paste(_crop(image, centre, crop_size, (width, height)), (column * width, height))
     collage.save(args.output_dir / "collage.jpg", quality=90)
 
-    summary = {key: value for key, value in physics.items() if not isinstance(value, torch.Tensor)}
+    summary = {key: value for key, value in physics.items() if not isinstance(value, (torch.Tensor, dict, list))}
+    if asset:
+        summary["asset"] = {key: value for key, value in asset.items() if key != "poses"}
     summary.update({"views": views, "video_frames": total, "frames": records})
     (args.output_dir / "meta.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps({key: value for key, value in summary.items() if key != "frames"}, indent=1))

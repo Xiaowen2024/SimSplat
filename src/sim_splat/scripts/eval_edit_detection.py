@@ -67,6 +67,7 @@ def main() -> None:
     parser.add_argument("--renders", type=Path, required=True, help="render_physics.py output directory")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default="an orange and white plastic barrier.")
+    parser.add_argument("--edited-prompt", help="prompt for the edited object when it was replaced by a different asset")
     parser.add_argument("--crop-pad", type=float, default=1.0, help="crop half-size = box size * (0.5 + pad)")
     parser.add_argument("--dino-model", default="IDEA-Research/grounding-dino-tiny")
     parser.add_argument("--dino-threshold", type=float, default=0.25)
@@ -85,7 +86,7 @@ def main() -> None:
     dino = pipeline(task="zero-shot-object-detection", model=args.dino_model, device=0)
     yolo = YOLO(args.yolo_model)
 
-    def detect_target(image: Image.Image, box: list[float] | None) -> list[dict]:
+    def detect_target(image: Image.Image, box: list[float] | None, prompt: str) -> list[dict]:
         if box is None:
             return []
         size = max(box[2] - box[0], box[3] - box[1]) * (1.0 + 2.0 * args.crop_pad)
@@ -93,7 +94,7 @@ def main() -> None:
         left, top = cx - size / 2, cy - size / 2
         crop = image.crop((int(left), int(top), int(left + size), int(top + size))).resize((512, 512))
         scale = 512 / size
-        found = dino(crop, candidate_labels=[args.prompt], threshold=args.dino_threshold)
+        found = dino(crop, candidate_labels=[prompt], threshold=args.dino_threshold)
         return [{"score": float(item["score"]),
                  "xyxy": [item["box"]["xmin"] / scale + left, item["box"]["ymin"] / scale + top,
                           item["box"]["xmax"] / scale + left, item["box"]["ymax"] / scale + top]} for item in found]
@@ -118,10 +119,10 @@ def main() -> None:
                 continue
             image = Image.open(path).convert("RGB")
             box = record["original_box"] if kind != "edited" else record["current_box"]
-            target = detect_target(image, box)
+            target = detect_target(image, box, args.edited_prompt if kind == "edited" and args.edited_prompt else args.prompt)
             row[kind] = {"target_detected": _matches(target, box, args.iou), "detections": target}
         background = Image.open(args.renders / "background" / f"{k:04d}.png").convert("RGB")
-        ghosts = detect_target(background, record["original_box"])
+        ghosts = detect_target(background, record["original_box"], args.prompt)
         row["background"] = {"ghost_at_original": _matches(ghosts, record["original_box"], args.iou), "detections": ghosts,
                              "coco_at_original": [item["label"] for item in detect_coco(background)
                                                   if record["original_box"] and _iou(item["xyxy"], record["original_box"]) >= args.iou]}
@@ -133,7 +134,7 @@ def main() -> None:
         hits = sum(row[kind]["target_detected"] for row in valid)
         return {"frames": len(valid), "detected": hits, "recall": round(hits / len(valid), 3) if valid else None}
 
-    summary: dict = {"prompt": args.prompt, "iou_threshold": args.iou, "phases": {}}
+    summary: dict = {"prompt": args.prompt, "edited_prompt": args.edited_prompt, "iou_threshold": args.iou, "phases": {}}
     for name in ("before", "pushing", "after"):
         subset = [row for row in rows if row["phase"] == name]
         summary["phases"][name] = {kind: rate(kind, name, subset) for kind in ("real", "original", "edited")}

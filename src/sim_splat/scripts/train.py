@@ -32,10 +32,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train a standalone SimSplat model.")
     parser.add_argument("--scene", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--experiment-name", help="override the config's experiment_name (output directory)")
     args = parser.parse_args()
 
     scene_config = load_scene_config(args.scene)
     train_config = load_train_config(args.config)
+    if args.experiment_name:
+        train_config.experiment_name = args.experiment_name
     torch.manual_seed(train_config.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(train_config.seed)
