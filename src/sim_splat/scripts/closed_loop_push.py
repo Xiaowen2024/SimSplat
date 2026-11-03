@@ -32,7 +32,8 @@ from sim_splat.data.dataparsers import parse_scene
 from sim_splat.engine.checkpoints import load_model_weights
 from sim_splat.models.sim_splat_model import SimSplatModel
 from sim_splat.scripts.build_lookalike_asset import asset_poses
-from sim_splat.scripts.eval_perception import TiledDetector, localize
+from sim_splat.scripts.eval_perception import TiledDetector, _iou, localize
+from sim_splat.scripts.eval_scene_perception import _ioa
 from sim_splat.scripts.render_edit import _to_uint8
 from sim_splat.scripts.render_physics import _box_mesh_gaussians, _project_box
 from sim_splat.scripts.simulate_excavator import BUCKET, ExcavatorWorld
@@ -59,9 +60,17 @@ def main() -> None:
     parser.add_argument("--prompt", default="an orange plastic barrier.")
     parser.add_argument("--surface-to-centre", action="store_true",
                         help="shift the depth estimate from the visible surface to the object centre (known size)")
+    parser.add_argument("--asset-root", type=Path,
+                        help="all look-alike assets (background inpainted with all removed): neighbours are simulated, the rest shown at rest")
+    parser.add_argument("--push-sign", type=float, default=1.0)
+    parser.add_argument("--clearance", type=float, default=0.15, help="m: gap behind the estimated object before lowering")
+    parser.add_argument("--predicted-box", action="store_true",
+                        help="gate detections by the box predicted from the last estimate; clip merged boxes to it")
     args = parser.parse_args()
 
-    world = ExcavatorWorld(args.scene, args.track, asset_dir=args.asset_dir, asset_mass=args.asset_mass)
+    neighbour_dirs = sorted(path.parent for path in args.asset_root.glob("*/asset.json")) if args.asset_root else ()
+    world = ExcavatorWorld(args.scene, args.track, asset_dir=args.asset_dir, asset_mass=args.asset_mass,
+                           push_sign=args.push_sign, neighbour_dirs=neighbour_dirs)
     scene = parse_scene(load_scene_config(args.scene))
     config = load_train_config(args.config)
     device = torch.device(config.device)
@@ -79,7 +88,20 @@ def main() -> None:
                                                                           config.model.sh_degree),
                                     torch.eye(4).expand(frames, 4, 4).clone(), everywhere)
                     for i, (name, g) in enumerate(zip(world.PARTS, world.part_ids))]
-    model.set_hidden_tracks([world.token])
+    # Neighbours: simulated motion on top of their own photo-fitted pose.  Other assets: at rest.
+    neighbour_tokens = {item["token"] for item in world.neighbours}
+    neighbour_actors, hidden = {}, [world.token]
+    for path in neighbour_dirs:
+        other = json.loads((path / "asset.json").read_text())
+        if other["track"] == world.token or other["track"] not in model.track_tokens:
+            continue
+        photo = asset_poses(model.object_to_world[:, model.track_tokens.index(other["track"])].detach().cpu().numpy(), other)
+        actor = model.add_actor(f"lookalike:{other['track'][:8]}", torch.load(path / "gaussians.pt"), torch.from_numpy(photo).float(), everywhere)
+        hidden.append(other["track"])
+        if other["track"] in neighbour_tokens:
+            neighbour_actors[other["track"]] = (actor, photo)
+    initial_neighbours = [pose.copy() for pose in world.neighbour_poses()]
+    model.set_hidden_tracks(hidden)
 
     # Observation camera: the captured view that sees the object largest.
     if args.view is None:
@@ -100,6 +122,10 @@ def main() -> None:
         model.object_to_world[:, asset_index] = torch.from_numpy(frame_from_sim @ world.asset_pose()).float().to(device)
         for index, pose in zip(part_indices, world.part_poses()):
             model.object_to_world[:, index] = torch.from_numpy(frame_from_sim @ pose).float().to(device)
+        for item, now, start in zip(world.neighbours, world.neighbour_poses(), initial_neighbours):
+            actor, photo = neighbour_actors[item["token"]]
+            motion = frame_from_sim @ now @ np.linalg.inv(start) @ sim_from_frame
+            model.object_to_world[:, actor] = torch.from_numpy(motion @ photo[frame]).float().to(device)
         with torch.no_grad():
             out = model.get_outputs(camera)
         return Image.fromarray(_to_uint8(out["rgb"])), out["depth"][..., 0].cpu().numpy()
@@ -114,19 +140,44 @@ def main() -> None:
         if detector is None:
             return truth_x(), {}
         ground = float((frame_from_sim @ world.asset_pose())[2, 3] - world.asset_half[2])
-        candidates = []
-        for det in detector(image):
-            point = localize(det["xyxy"], c2w, K, ground, depth).get("depth")
+        detections = detector(image)
+        if args.predicted_box:
+            # Track gating: where the object should appear, given the last estimate and
+            # its known size.  The detector often boxes a whole row of barriers as one;
+            # the predicted box picks the unit out of such a merged box.
+            predicted_pose = frame_from_sim @ world.asset_pose()
+            predicted_pose[:3, 3] = estimate_world
+            predicted = _project_box(predicted_pose, world.asset_half, camera)
+            scored = [(_ioa(predicted, det["xyxy"]) * min(1.0, _iou(predicted, det["xyxy"]) / 0.3), det) for det in detections] if predicted else []
+            scored = [item for item in scored if item[0] > 0.2]
+            if not scored:
+                return None, {"detections": len(detections), "predicted_box": predicted}
+            _, det = max(scored, key=lambda item: item[0])
+            box = [max(det["xyxy"][0], predicted[0]), det["xyxy"][1], min(det["xyxy"][2], predicted[2]), det["xyxy"][3]]
+            point = localize(box, c2w, K, ground, depth).get("depth")
             if point is None:
-                continue
+                return None, {"detections": len(detections)}
             point = np.asarray(point)
             if args.surface_to_centre:
                 ray = point - c2w[:3, 3]
                 point = point + ray / np.linalg.norm(ray) * float(world.asset_half[0])
-            candidates.append((float(np.linalg.norm(point[:2] - estimate_world[:2])), point, det))
-        if not candidates:
-            return None, {"detections": 0}
-        distance, point, det = min(candidates, key=lambda item: item[0])
+            distance = float(np.linalg.norm(point[:2] - estimate_world[:2]))
+            det = {**det, "xyxy": box}
+            candidates = [det]
+        else:
+            candidates = []
+            for det in detections:
+                point = localize(det["xyxy"], c2w, K, ground, depth).get("depth")
+                if point is None:
+                    continue
+                point = np.asarray(point)
+                if args.surface_to_centre:
+                    ray = point - c2w[:3, 3]
+                    point = point + ray / np.linalg.norm(ray) * float(world.asset_half[0])
+                candidates.append((float(np.linalg.norm(point[:2] - estimate_world[:2])), point, det))
+            if not candidates:
+                return None, {"detections": 0}
+            distance, point, det = min(candidates, key=lambda item: item[0])
         if distance > 1.5:
             return None, {"detections": len(candidates), "nearest_m": distance}
         estimate_world = point
@@ -175,16 +226,19 @@ def main() -> None:
         if estimate is None or abs(goal - estimate) < args.tolerance or cycle == args.max_cycles or tilt > 45:
             break
         push = float(np.clip(goal - estimate, -args.max_step, args.max_step))
-        behind = estimate - world.reach - BUCKET[2] - 0.15
+        # Lower the bucket further behind the object than the perception error, or it
+        # lands on top of it (seen: 0.25-0.47 m error with a 0.15 m gap toppled it).
+        behind = estimate - world.reach - BUCKET[2] - args.clearance
         move(np.array((behind, hit_z + 0.6)), 1.0)  # above and behind
         move(np.array((behind, hit_z)), 1.0)  # lower
-        move(np.array((behind + 0.15 + push, hit_z)), args.speed)  # push (0.15 m to close the gap)
+        move(np.array((behind + args.clearance + push, hit_z)), args.speed)  # push (closing the gap first)
         move(np.array((behind + push - 0.3, hit_z + 0.6)), 1.0)  # back off and up, out of the camera's way
 
     final = truth_x() - x0
     summary = {"perception": args.perception, "view": args.view, "goal_m": args.goal_distance, "final_true_m": final,
                "final_error_m": abs(args.goal_distance - final), "success": abs(args.goal_distance - final) < args.tolerance and log[-1]["tilt_deg"] < 45,
-               "cycles": len(log) - 1, "surface_to_centre": args.surface_to_centre,
+               "cycles": len(log) - 1, "surface_to_centre": args.surface_to_centre, "predicted_box": args.predicted_box,
+               "clearance_m": args.clearance,
                "median_perception_error_m": float(np.median([r["perception_error_m"] for r in log if r["perception_error_m"] is not None]))
                if any(r["perception_error_m"] is not None for r in log) else None}
     (args.output_dir / "closed_loop.json").write_text(json.dumps({"summary": summary, "cycles": log}, indent=1))

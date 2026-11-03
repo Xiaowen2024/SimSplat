@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -61,8 +62,18 @@ def main() -> None:
             batch = manager.dataset[dataset_index]
             batch.image = batch.image.to(device)
             batch.static_mask = batch.static_mask.to(device)
+            torch.cuda.synchronize(device)
+            start = time.perf_counter()
             prediction = model.get_outputs(batch.camera)["rgb"]
+            torch.cuda.synchronize(device)
             metrics = model.get_metrics_dict({"rgb": prediction}, batch)
+            metrics["render_ms"] = 1000.0 * (time.perf_counter() - start)
+            # Pixels inside annotated object boxes (the static mask's complement):
+            # where rigid actors should matter.
+            dynamic = batch.static_mask[..., 0] < 0.5
+            if bool(dynamic.any()):
+                error = ((prediction.clamp(0, 1) - batch.image) ** 2)[dynamic].mean()
+                metrics["dynamic_psnr"] = float(-10 * torch.log10(error.clamp_min(1e-10)))
             if image_metrics:
                 pair = prediction.clamp(0, 1).permute(2, 0, 1)[None], batch.image.permute(2, 0, 1)[None]
                 metrics["ssim"] = float(image_metrics[0](*pair))
@@ -73,7 +84,9 @@ def main() -> None:
                 _save_rgb(args.render_dir / f"{index:03d}_{Path(batch.image_name).stem}_target.png", batch.image)
                 _save_rgb(args.render_dir / f"{index:03d}_{Path(batch.image_name).stem}_static_mask.png", batch.static_mask.expand_as(batch.image))
 
-    aggregate = {key: float(np.mean([record[key] for record in measurements])) for key in measurements[0]}
+    keys = sorted({key for record in measurements for key in record})
+    aggregate = {key: float(np.mean([record[key] for record in measurements if key in record])) for key in keys}
+    aggregate["render_fps"] = 1000.0 / float(np.median([record["render_ms"] for record in measurements[1:] or measurements]))
     result = {"checkpoint_step": checkpoint_step, "num_eval_views": len(measurements), "mean": aggregate, "per_view": measurements}
     print(json.dumps(result, indent=2, sort_keys=True))
     if args.output:

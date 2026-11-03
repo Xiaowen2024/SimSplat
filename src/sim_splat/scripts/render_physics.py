@@ -305,8 +305,8 @@ def main() -> None:
             centre = ((focus[0] + focus[2]) / 2, (focus[1] + focus[3]) / 2)
             canvas = Image.new("RGB", (2 * width, 2 * height))
             for column, name in enumerate(("original", "edited")):
-                label = "original scene" if name == "original" else f"{label}  t={step / physics['fps']:.2f}s"
-                canvas.paste(_labelled(np.asarray(images[name]), label), (column * width, 0))
+                caption = "original scene" if name == "original" else f"{label}  t={step / physics['fps']:.2f}s"
+                canvas.paste(_labelled(np.asarray(images[name]), caption), (column * width, 0))
                 canvas.paste(_crop(images[name], centre, crop_size, (width, height)), (column * width, height))
             video_frames.append(canvas)
 
