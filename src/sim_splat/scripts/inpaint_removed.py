@@ -49,6 +49,7 @@ from sim_splat.data.dataparsers import parse_scene
 from sim_splat.engine.checkpoints import load_model_weights, save_checkpoint
 from sim_splat.engine.optimizers import build_gaussian_optimizers
 from sim_splat.models.sim_splat_model import SimSplatModel
+from sim_splat.scripts.build_lookalike_asset import asset_poses as look_alike_poses
 from sim_splat.scripts.render_physics import _object_alpha, _project_box
 from sim_splat.scripts.train import _scene_scale
 
@@ -60,19 +61,26 @@ def _dilate(mask: np.ndarray, pixels: int) -> np.ndarray:
     return cv2.dilate(mask.astype(np.uint8), kernel) > 0
 
 
+def _keep_rows(model, keep: torch.Tensor) -> None:
+    model.gauss_params = torch.nn.ParameterDict({name: torch.nn.Parameter(p.detach()[keep]) for name, p in model.gauss_params.items()})
+    model.point_track_indices = model.point_track_indices[keep]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scene", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--track", required=True, help="unique prefix of the removed actor")
+    parser.add_argument("--track", help="unique prefix of the removed actor (not needed with --asset-root)")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=3000)
     parser.add_argument("--min-pixels", type=int, default=400, help="skip views where the actor covers fewer pixels")
     parser.add_argument("--dilate", type=int, default=9, help="mask dilation, pixels")
     parser.add_argument("--lr-scale", type=float, default=0.1, help="fraction of the training learning rates")
     parser.add_argument("--inpaint-fraction", type=float, default=0.5, help="share of steps on inpainted views")
-    parser.add_argument("--asset-dir", type=Path, help="look-alike asset: carve its volume and use it as the object")
+    assets = parser.add_mutually_exclusive_group()
+    assets.add_argument("--asset-dir", type=Path, help="look-alike asset: carve its volume and use it as the object")
+    assets.add_argument("--asset-root", type=Path, help="directory of look-alike assets (one per sub-directory): all at once")
     parser.add_argument("--carve-margin", type=float, default=0.08, help="m, around the asset (not below it)")
     args = parser.parse_args()
 
@@ -84,51 +92,75 @@ def main() -> None:
     model = SimSplatModel(train_config.model, scene, train_config.device)
     step0 = load_model_weights(args.checkpoint, model, train_config.device)
     model.set_step(10**9)
-    matches = [token for token in model.track_tokens if token.startswith(args.track)]
-    if len(matches) != 1:
-        raise ValueError(f"track prefix {args.track!r} matched {len(matches)} tracks")
-    target = matches[0]
-    track = model.track_tokens.index(target)
+    asset_dirs = ([args.asset_dir] if args.asset_dir else
+                  sorted(path.parent for path in args.asset_root.glob("*/asset.json")) if args.asset_root else [])
+    infos = [json.loads((path / "asset.json").read_text()) for path in asset_dirs]
+    prefixes = [info["track"] for info in infos] if args.asset_root else [args.track]
+    if not prefixes or prefixes[0] is None:
+        raise ValueError("give --track or --asset-root")
+    targets = []
+    for prefix in prefixes:
+        matches = [token for token in model.track_tokens if token.startswith(prefix)]
+        if len(matches) != 1:
+            raise ValueError(f"track prefix {prefix!r} matched {len(matches)} tracks")
+        targets.append(matches[0])
+    tracks = [model.track_tokens.index(target) for target in targets]
     manager = FullImageDataManager(scene, seed=train_config.seed)
     dataset = manager.dataset
-    half = np.asarray(scene.metadata["dynamic_track_box_size_xyz"][track], dtype=np.float64) / 2.0
-    hidden_object = [target]
-    asset_index = None
+    sizes = scene.metadata["dynamic_track_box_size_xyz"]
+    halves = [np.asarray(sizes[track], dtype=np.float64) / 2.0 for track in tracks]
+    asset_indices: list[int] = []
+    asset_tokens: list[str] = []
     carved = 0
-    if args.asset_dir:
-        info = json.loads((args.asset_dir / "asset.json").read_text())
-        asset_poses = model.object_to_world[:, track].detach().double() @ torch.tensor(info["local_correction"], device=device).double()
-        asset_half = torch.tensor(info["size_xyz"], device=device).double() / 2.0
+    if infos:
         static = model.point_track_indices < 0
         means = model.gauss_params["means"].detach().double()
         inside = torch.zeros_like(static)
-        frames = torch.nonzero(model.track_visible[:, track]).flatten()
-        for frame in frames[:: max(1, len(frames) // 60)]:
-            pose = asset_poses[frame]
-            local = (means - pose[:3, 3]) @ pose[:3, :3]
-            inside |= ((local[:, :2].abs() <= asset_half[:2] + args.carve_margin).all(1)
-                       & (local[:, 2] >= -asset_half[2] + 0.03) & (local[:, 2] <= asset_half[2] + args.carve_margin))
+        all_poses = []
+        for track, info in zip(tracks, infos):
+            asset_poses = torch.from_numpy(look_alike_poses(model.object_to_world[:, track].detach().cpu().numpy(), info)).to(device)
+            all_poses.append(asset_poses)
+            asset_half = torch.tensor(info["size_xyz"], device=device).double() / 2.0
+            frames = torch.nonzero(model.track_visible[:, track]).flatten()
+            for frame in frames[:: max(1, len(frames) // 60)]:
+                pose = asset_poses[frame]
+                local = (means - pose[:3, 3]) @ pose[:3, :3]
+                inside |= ((local[:, :2].abs() <= asset_half[:2] + args.carve_margin).all(1)
+                           & (local[:, 2] >= -asset_half[2] + 0.03) & (local[:, 2] <= asset_half[2] + args.carve_margin))
         keep = ~(inside & static)
         carved = int((~keep).sum())
-        model.gauss_params = torch.nn.ParameterDict({name: torch.nn.Parameter(p.detach()[keep]) for name, p in model.gauss_params.items()})
-        model.point_track_indices = model.point_track_indices[keep]
-        print(f"carved {carved} static Gaussians inside the asset volume", flush=True)
-        asset_index = model.add_actor("lookalike", torch.load(args.asset_dir / "gaussians.pt"), asset_poses.float(),
-                                      torch.ones((asset_poses.shape[0],), dtype=torch.bool))
-        # Occluders: static Gaussians in front of the asset inside its silhouette.
+        _keep_rows(model, keep)
+        print(f"carved {carved} static Gaussians inside {len(infos)} asset volume(s)", flush=True)
+        for path, info, asset_poses in zip(asset_dirs, infos, all_poses):
+            token = f"lookalike:{info['track'][:8]}"
+            asset_indices.append(model.add_actor(token, torch.load(path / "gaussians.pt"), asset_poses.float(),
+                                                 torch.ones((asset_poses.shape[0],), dtype=torch.bool)))
+            asset_tokens.append(token)
+    asset_set = torch.tensor(asset_indices, device=device, dtype=torch.long)
+
+    def asset_rows() -> torch.Tensor:
+        return torch.isin(model.point_track_indices, asset_set)
+
+    def render_assets(camera):
+        """Assets alone: silhouette (alpha) and nearest asset surface depth."""
+        rows = asset_rows()
+        backup = model.gauss_params["opacities"].data.clone()
+        model.gauss_params["opacities"].data[~rows] = -30.0
+        try:
+            return model.get_outputs(camera)
+        finally:
+            model.gauss_params["opacities"].data.copy_(backup)
+
+    if infos:
+        # Occluders: static Gaussians in front of an asset inside its silhouette.
         votes = torch.zeros(len(model.point_track_indices), device=device)
         static = model.point_track_indices < 0
         model.eval()
+        model.set_hidden_tracks([])
         with torch.no_grad():
             for index in scene.train_indices:
                 camera = scene.cameras[index]
-                rows = model.point_track_indices == asset_index
-                opacities = model.gauss_params["opacities"]
-                backup = opacities.data.clone()
-                opacities.data[~rows] = -30.0
-                model.set_hidden_tracks([])
-                out = model.get_outputs(camera)
-                opacities.data.copy_(backup)
+                out = render_assets(camera)
                 silhouette, surface = out["alpha"][..., 0] > 0.5, out["depth"][..., 0]
                 if silhouette.sum() < 50:
                     continue
@@ -144,12 +176,10 @@ def main() -> None:
                 hit[torch.nonzero(ok).flatten()[front]] = True
                 votes += hit.float()
         occluders = votes >= 2
-        keep = ~occluders
-        model.gauss_params = torch.nn.ParameterDict({name: torch.nn.Parameter(p.detach()[keep]) for name, p in model.gauss_params.items()})
-        model.point_track_indices = model.point_track_indices[keep]
+        _keep_rows(model, ~occluders)
         carved += int(occluders.sum())
-        print(f"carved {int(occluders.sum())} static Gaussians occluding the asset", flush=True)
-        hidden_object = [target, "lookalike"]
+        print(f"carved {int(occluders.sum())} static Gaussians occluding the assets", flush=True)
+    hidden_object = targets + asset_tokens
 
     # 1-2. Silhouette masks and LaMa fills on the captured photos.
     lama = SimpleLama()
@@ -160,25 +190,28 @@ def main() -> None:
     with torch.no_grad():
         for index in scene.train_indices:
             camera = scene.cameras[index]
-            if not bool(model.track_visible[camera.image_id, track]):
-                continue
             # Actor Gaussians can float far from the object along viewing rays;
-            # keep only the silhouette inside the projected (enlarged) 3D box.
-            pose = model.object_to_world[camera.image_id, asset_index if asset_index is not None else track].detach().cpu().numpy().astype(np.float64)
-            box = _project_box(pose, (asset_half.cpu().numpy() if asset_index is not None else half) * 1.15, camera)
-            if box is None:
-                continue
+            # keep only the silhouette inside the projected (enlarged) 3D boxes.
             inside = np.zeros((camera.height, camera.width), dtype=bool)
-            inside[int(box[1]) : int(np.ceil(box[3])), int(box[0]) : int(np.ceil(box[2]))] = True
-            rows = model.point_track_indices == (asset_index if asset_index is not None else track)
-            silhouette = (_object_alpha(model, rows, camera) > 0.3).cpu().numpy() & inside
+            for i, track in enumerate(tracks):
+                if not bool(model.track_visible[camera.image_id, track]):
+                    continue
+                owner = asset_indices[i] if infos else track
+                pose = model.object_to_world[camera.image_id, owner].detach().cpu().numpy().astype(np.float64)
+                half = np.asarray(infos[i]["size_xyz"]) / 2.0 if infos else halves[i]
+                box = _project_box(pose, half * 1.15, camera)
+                if box is not None:
+                    inside[int(box[1]) : int(np.ceil(box[3])), int(box[0]) : int(np.ceil(box[2]))] = True
+            if not inside.any():
+                continue
             surface = None
-            if asset_index is not None:
-                backup = model.gauss_params["opacities"].data.clone()
-                model.gauss_params["opacities"].data[~rows] = -30.0
-                rendered = model.get_outputs(camera)
-                model.gauss_params["opacities"].data.copy_(backup)
+            if infos:
+                rendered = render_assets(camera)
+                silhouette = (rendered["alpha"][..., 0] > 0.3).cpu().numpy() & inside
                 surface = torch.where(rendered["alpha"][..., 0] > 0.5, rendered["depth"][..., 0], torch.full_like(rendered["depth"][..., 0], 1e6))
+            else:
+                rows = model.point_track_indices == tracks[0]
+                silhouette = (_object_alpha(model, rows, camera) > 0.3).cpu().numpy() & inside
             if silhouette.sum() < args.min_pixels:
                 continue
             mask = _dilate(silhouette, args.dilate) & _dilate(inside, args.dilate)
@@ -216,7 +249,7 @@ def main() -> None:
             batch.image = batch.image.to(device)
             batch.static_mask = batch.static_mask.to(device)
             # With an asset, it (not the near-transparent track) renders the object.
-            model.set_hidden_tracks([target] if asset_index is not None else [])
+            model.set_hidden_tracks(targets if infos else [])
         outputs = model.get_outputs(batch.camera)
         loss = sum(model.get_loss_dict(outputs, batch).values())
         for optimizer in optimizers.values():
@@ -242,17 +275,19 @@ def main() -> None:
             print(f"step={step} loss={float(loss):.4f}", flush=True)
 
     model.set_hidden_tracks([])
-    if asset_index is not None:  # drop the asset again: the checkpoint must match the scene's tracks
-        keep = model.point_track_indices != asset_index
-        model.gauss_params = torch.nn.ParameterDict({name: torch.nn.Parameter(p.detach()[keep]) for name, p in model.gauss_params.items()})
-        model.point_track_indices = model.point_track_indices[keep]
-        model.object_to_world = model.object_to_world[:, :asset_index]
-        model.track_visible = model.track_visible[:, :asset_index]
-        model.track_tokens.pop()
-    save_checkpoint(args.output_dir / "final.pt", step0, model, optimizers)
+    if infos:  # drop the assets again: the checkpoint must match the scene's tracks
+        _keep_rows(model, ~asset_rows())
+        first = asset_indices[0]
+        model.object_to_world = model.object_to_world[:, :first]
+        model.track_visible = model.track_visible[:, :first]
+        del model.track_tokens[first:]
+    # Weights only: the optimizer state would triple the file and nothing resumes from it.
+    save_checkpoint(args.output_dir / "final.pt", step0, model, {})
     (args.output_dir / "inpaint.json").write_text(json.dumps(
-        {"track": target, "views": [index for index, *_ in views], "steps": args.steps, "lr_scale": args.lr_scale,
-         "dilate": args.dilate, "carved": carved, "asset_dir": str(args.asset_dir) if args.asset_dir else None, "log": log}, indent=1))
+        {"tracks": targets, "views": [index for index, *_ in views], "steps": args.steps, "lr_scale": args.lr_scale,
+         "dilate": args.dilate, "carved": carved, "asset_dirs": [str(path) for path in asset_dirs], "log": log}, indent=1))
+
+
 
 
 if __name__ == "__main__":

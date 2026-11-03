@@ -118,6 +118,8 @@ def main() -> None:
     parser.add_argument("--hold", type=int, default=24, help="extra still frames after the simulation ends")
     parser.add_argument("--zoom", type=float, default=3.0)
     parser.add_argument("--asset-gaussians", type=int, default=60000)
+    parser.add_argument("--asset-root", type=Path, help="all look-alike assets: those not simulated are shown at rest")
+    parser.add_argument("--skip-depth", action="store_true", help="do not save per-frame depth (needed only by eval_perception)")
     args = parser.parse_args()
 
     scene = parse_scene(load_scene_config(args.scene))
@@ -155,6 +157,27 @@ def main() -> None:
         gaussians = _box_mesh_gaussians(part["half_extent"], tuple(part["color"]), train_config.model.sh_degree)
         part_indices.append(model.add_actor(f"sim:{i}:{part['name']}", gaussians, part["poses"][0].expand(frames, 4, 4).clone(), everywhere))
     sim_tokens = [f"sim:{i}:{part['name']}" for i, part in enumerate(parts)]
+    # Other simulated bodies (look-alike neighbours pushed or hit in turn).
+    neighbours = physics.get("neighbours") or []
+    neighbour_indices = [model.add_actor(f"physics:nb:{item['token'][:8]}", torch.load(item["gaussians"]), still, everywhere)
+                         for item in neighbours]
+    physics_tokens = [f"physics:{target}", *(f"physics:nb:{item['token'][:8]}" for item in neighbours)]
+    # Look-alike assets that are not simulated stay where they are (the background
+    # was inpainted with all of them removed).
+    from sim_splat.scripts.build_lookalike_asset import asset_poses as look_alike_poses
+
+    simulated_tokens = {target, *(item["token"] for item in neighbours)}
+    static_tokens = []
+    if args.asset_root:
+        for path in sorted(args.asset_root.glob("*/asset.json")):
+            info = json.loads(path.read_text())
+            if info["track"] in simulated_tokens or info["track"] not in model.track_tokens:
+                continue
+            own = model.object_to_world[:, model.track_tokens.index(info["track"])].detach().cpu().numpy()
+            model.add_actor(f"static:{info['track'][:8]}", torch.load(path.parent / "gaussians.pt"),
+                            torch.from_numpy(look_alike_poses(own, info)).float(), everywhere)
+            static_tokens.append(info["track"])
+    hidden_tracks = [target, *(item["token"] for item in neighbours), *static_tokens]
 
     # nuScenes annotations of a static object can drift between frames
     # (measured: 0.86 m in z for this barrier, since ego poses carry no real
@@ -163,10 +186,27 @@ def main() -> None:
     track_poses = model.object_to_world[:, track].detach().cpu().numpy().astype(np.float64)
     initial_inverse = np.linalg.inv(initial)
 
+    anchor = track_poses @ initial_inverse  # frame f's world <- simulation world
+    if asset and "asset_dir" in asset:  # look-alike: anchor on the asset's per-frame pose (height-corrected)
+        info = json.loads((Path(asset["asset_dir"]) / "asset.json").read_text())
+        anchor = look_alike_poses(track_poses, info) @ np.linalg.inv(asset["initial_pose"].numpy().astype(np.float64))
+
     def to_frame(frame: int, pose: np.ndarray) -> np.ndarray:
         """Map a simulated world pose into frame ``frame``'s annotation world."""
 
-        return track_poses[frame] @ initial_inverse @ pose
+        return anchor[frame] @ pose
+
+    # Neighbours were snapped onto the simulator's ground plane: render their
+    # simulated *motion* on top of their own photo-fitted pose instead.
+    neighbour_photo_poses = []
+    for item in neighbours:
+        info = json.loads((Path(item["asset_dir"]) / "asset.json").read_text())
+        own = model.object_to_world[:, model.track_tokens.index(item["token"])].detach().cpu().numpy()
+        neighbour_photo_poses.append(look_alike_poses(own, info))
+
+    def neighbour_pose(item: dict, photo_poses: np.ndarray, frame: int, step: int) -> np.ndarray:
+        motion = item["poses"][step].numpy().astype(np.float64) @ np.linalg.inv(item["initial_pose"].numpy().astype(np.float64))
+        return anchor[frame] @ motion @ np.linalg.inv(anchor[frame]) @ photo_poses[frame]
 
     def simulated(step: int, frame: int) -> np.ndarray:
         return to_frame(frame, poses[step])
@@ -190,14 +230,26 @@ def main() -> None:
             model.object_to_world[:, clone_index] = torch.from_numpy(simulated(step, source)).float().to(device)
             for part, index in zip(parts, part_indices):
                 model.object_to_world[:, index] = torch.from_numpy(to_frame(source, part["poses"][step].numpy().astype(np.float64))).float().to(device)
+
+            def pose_neighbours(at: int) -> None:
+                for item, index, photo_poses in zip(neighbours, neighbour_indices, neighbour_photo_poses):
+                    model.object_to_world[:, index] = torch.from_numpy(neighbour_pose(item, photo_poses, source, at)).float().to(device)
+
             renders = {}
             for name, hidden in (
-                ("original", [f"physics:{target}", *sim_tokens]),
-                ("edited", [target]),
-                ("background", [target, f"physics:{target}", *sim_tokens]),
+                # With look-alike neighbours the background has all of them removed:
+                # "original" is the simulated scene before anything moved.
+                ("original", [f"physics:{target}", *sim_tokens, *hidden_tracks] if neighbours else [*physics_tokens, *sim_tokens]),
+                ("edited", hidden_tracks),
+                ("background", [*hidden_tracks, *physics_tokens, *sim_tokens]),
             ):
+                pose_neighbours(0 if name == "original" else step)
+                if name == "original" and neighbours:
+                    model.object_to_world[:, clone_index] = torch.from_numpy(simulated(0, source)).float().to(device)
+                    hidden = [*sim_tokens, *hidden_tracks]
                 model.set_hidden_tracks(hidden)
                 out = model.get_outputs(camera)
+                model.object_to_world[:, clone_index] = torch.from_numpy(simulated(step, source)).float().to(device)
                 renders[name] = out
                 Image.fromarray(_to_uint8(out["rgb"])).save(args.output_dir / name / f"{k:04d}.png")
             is_real = camera is scene.cameras[source]
@@ -240,9 +292,11 @@ def main() -> None:
                             "original_silhouette_box": silhouette_box(before), "current_silhouette_box": silhouette_box(now),
                             "original_centre": track_poses[source][:3, 3].tolist() if not asset else to_frame(source, poses[0])[:3, 3].tolist(),
                             "current_centre": moved_now[:3, 3].tolist(), "current_up": moved_now[:3, 2].tolist(),
+                            "neighbour_centres": [neighbour_pose(item, photo, source, step)[:3, 3].tolist()
+                                                  for item, photo in zip(neighbours, neighbour_photo_poses)],
                             "ground_z": float(to_frame(source, poses[0])[2, 3] - moved_half[2]),
                             "camera": {"c2w": camera.c2w.tolist(), "K": camera.K.tolist(), "width": camera.width, "height": camera.height}})
-            for name in ("edited", "original"):
+            for name in ("edited", "original") if not args.skip_depth else ():
                 np.save(args.output_dir / name / f"{k:04d}_depth.npy", renders[name]["depth"][..., 0].half().cpu().numpy())
 
             # Video frame: original | edited on top, zoomed crops below.
@@ -285,7 +339,8 @@ def main() -> None:
 
     summary = {key: value for key, value in physics.items() if not isinstance(value, (torch.Tensor, dict, list))}
     if asset:
-        summary["asset"] = {key: value for key, value in asset.items() if key != "poses"}
+        summary["asset"] = {key: value for key, value in asset.items() if not isinstance(value, torch.Tensor)}
+    summary["neighbours"] = [{key: value for key, value in item.items() if not isinstance(value, torch.Tensor)} for item in neighbours]
     summary.update({"views": views, "video_frames": total, "frames": records})
     (args.output_dir / "meta.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps({key: value for key, value in summary.items() if key != "frames"}, indent=1))

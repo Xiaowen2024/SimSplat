@@ -31,6 +31,7 @@ from sim_splat.config import load_scene_config, load_train_config
 from sim_splat.data.dataparsers import parse_scene
 from sim_splat.engine.checkpoints import load_model_weights
 from sim_splat.models.sim_splat_model import SimSplatModel
+from sim_splat.scripts.build_lookalike_asset import asset_poses
 from sim_splat.scripts.eval_perception import TiledDetector, localize
 from sim_splat.scripts.render_edit import _to_uint8
 from sim_splat.scripts.render_physics import _box_mesh_gaussians, _project_box
@@ -70,7 +71,6 @@ def main() -> None:
     model.set_step(10**9)
     track = model.track_tokens.index(world.token)
     track_poses = model.object_to_world[:, track].detach().cpu().numpy().astype(np.float64)
-    initial_inverse = np.linalg.inv(world.annotation)
     frames = track_poses.shape[0]
     everywhere = torch.ones((frames,), dtype=torch.bool)
     asset_index = model.add_actor("asset", torch.load(args.asset_dir / "gaussians.pt"),
@@ -88,7 +88,9 @@ def main() -> None:
         args.view = best[1]
     camera = scene.cameras[args.view]
     frame = camera.image_id
-    frame_from_sim = track_poses[frame] @ initial_inverse  # simulation world -> this frame's world (see render_physics)
+    # simulation world -> this frame's world (see render_physics): anchored on the asset's height-corrected pose
+    info = json.loads((args.asset_dir / "asset.json").read_text())
+    frame_from_sim = asset_poses(track_poses, info)[frame] @ np.linalg.inv(world.asset_record["initial_pose"].numpy().astype(np.float64))
     sim_from_frame = np.linalg.inv(frame_from_sim)
     e_from_world = np.linalg.inv(world.world_from_e)
     c2w, K = camera.c2w.numpy().astype(np.float64), camera.K.numpy().astype(np.float64)
