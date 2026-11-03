@@ -23,6 +23,7 @@ from sim_splat.data.datamanagers.full_image_datamanager import FullImageDataMana
 from sim_splat.data.dataparsers import parse_scene
 from sim_splat.engine.checkpoints import load_model_weights
 from sim_splat.models.sim_splat_model import SimSplatModel, _psnr_from_mse
+from sim_splat.types import Camera
 
 
 def _to_uint8(image: torch.Tensor) -> np.ndarray:
@@ -56,6 +57,54 @@ def _resolve_tracks(selectors: list[str], tracks: list[dict], threshold: float) 
     return sorted(set(chosen))
 
 
+def _interpolate_camera_path(cameras: list[Camera], indices: list[int], inserts: int) -> list[tuple[Camera, int]]:
+    """Return a smooth SE(3) path between selected capture cameras.
+
+    Each interpolated camera borrows the nearer endpoint's image id so actor
+    poses remain sourced from the existing per-frame scene graph.  The RGB
+    comparison panel likewise uses that nearest captured view.
+    """
+
+    if inserts <= 0 or len(indices) < 2:
+        return [(cameras[index], index) for index in indices]
+    from scipy.spatial.transform import Rotation, Slerp
+
+    path: list[tuple[Camera, int]] = []
+    for left_index, right_index in zip(indices[:-1], indices[1:]):
+        left, right = cameras[left_index], cameras[right_index]
+        path.append((left, left_index))
+        # Never interpolate across physical sensors or heterogeneous optics.
+        if left.sensor_id != right.sensor_id or left.K.shape != right.K.shape or not torch.allclose(left.K, right.K):
+            continue
+        rotations = Rotation.from_matrix(torch.stack((left.c2w[:3, :3], right.c2w[:3, :3])).numpy())
+        slerp = Slerp((0.0, 1.0), rotations)
+        for item in range(1, inserts + 1):
+            alpha = item / (inserts + 1)
+            c2w = torch.eye(4, dtype=torch.float32)
+            c2w[:3, :3] = torch.from_numpy(slerp(alpha).as_matrix()).float()
+            c2w[:3, 3] = (1.0 - alpha) * left.c2w[:3, 3] + alpha * right.c2w[:3, 3]
+            source = left_index if alpha < 0.5 else right_index
+            path.append(
+                (
+                    Camera(
+                        c2w=c2w,
+                        K=left.K,
+                        width=left.width,
+                        height=left.height,
+                        image_id=source,
+                        model=left.model,
+                        distortion_params=left.distortion_params,
+                        is_rectified=left.is_rectified,
+                        sensor_id=left.sensor_id,
+                        timestamp=(1.0 - alpha) * left.timestamp + alpha * right.timestamp,
+                    ),
+                    source,
+                )
+            )
+    path.append((cameras[indices[-1]], indices[-1]))
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", type=Path, required=True)
@@ -71,6 +120,7 @@ def main() -> None:
     parser.add_argument("--channel", type=int, help="only render this sensor id (e.g. 0 = first channel)")
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--video", action="store_true", help="also write an mp4 of the panels")
+    parser.add_argument("--interpolate-camera-steps", type=int, default=0, help="smooth camera inserts between consecutive same-sensor views")
     parser.add_argument("--actor-file", action="append", type=Path, default=[], help="rigid actor from lift_masks_to_actor.py")
     args = parser.parse_args()
 
@@ -95,10 +145,19 @@ def main() -> None:
         )
     ]
     frames = len(outputs.image_paths)
+    physics_actor_tokens: list[str] = []
     for actor_path in args.actor_file:
         actor = torch.load(actor_path, map_location="cpu", weights_only=False)
         pose = torch.from_numpy(np.asarray(actor["object_to_world"], dtype=np.float32))
-        model.add_actor(actor["name"], actor["gaussians"], pose.expand(frames, 4, 4).clone(), torch.ones((frames,), dtype=torch.bool))
+        if pose.shape == (4, 4):
+            pose = pose.expand(frames, 4, 4).clone()
+        if pose.shape != (frames, 4, 4):
+            raise ValueError(f"Actor {actor_path} poses must be [4,4] or [{frames},4,4], got {tuple(pose.shape)}")
+        visible = torch.as_tensor(actor.get("visible", np.ones((frames,), dtype=bool)), dtype=torch.bool)
+        if visible.shape != (frames,):
+            raise ValueError(f"Actor {actor_path} visibility must have shape ({frames},)")
+        model.add_actor(actor["name"], actor["gaussians"], pose, visible)
+        physics_actor_tokens.append(actor["name"])
         half = np.asarray(actor["half_extent_xyz"], dtype=np.float64)
         tracks.append({"token": actor["name"], "category": "lifted", "displacement": 0.0, "box_size_xyz": (2.0 * half).tolist()})
 
@@ -145,6 +204,7 @@ def main() -> None:
     if args.channel is not None:
         indices = [index for index in indices if outputs.cameras[index].sensor_id == args.channel]
     indices = indices[:: max(args.stride, 1)]
+    render_path = _interpolate_camera_path(outputs.cameras, indices, args.interpolate_camera_steps)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     panels: list[Path] = []
@@ -152,20 +212,31 @@ def main() -> None:
     edit_tokens = sorted(set(hidden) | set(replaced))
     asset_tokens = [f"asset:{token}" for token in replaced]
     with torch.no_grad():
-        for count, index in enumerate(indices):
+        for count, (camera, index) in enumerate(render_path):
             batch = manager.dataset[index]
             target = batch.image.to(device)
-            model.set_hidden_tracks(asset_tokens)
-            full = model.get_outputs(batch.camera)["rgb"]
-            psnrs.append(float(_psnr_from_mse((full - target).square().mean()).item()))
-            images = [_labelled(_to_uint8(target), "ground truth"), _labelled(_to_uint8(full), f"reconstruction {psnrs[-1]:.1f} dB")]
+            # The baseline panel contains only the reconstructed original
+            # scene; externally supplied physics actors are hidden here.
+            model.set_hidden_tracks(asset_tokens + physics_actor_tokens)
+            full = model.get_outputs(camera)["rgb"]
+            if camera is outputs.cameras[index]:
+                # PSNR only exists for captured views; inserted path cameras
+                # show the nearest captured photo for reference.
+                psnrs.append(float(_psnr_from_mse((full - target).square().mean()).item()))
+                images = [_labelled(_to_uint8(target), "ground truth"), _labelled(_to_uint8(full), f"reconstruction {psnrs[-1]:.1f} dB")]
+            else:
+                images = [_labelled(_to_uint8(target), "nearest captured view"), _labelled(_to_uint8(full), "reconstruction (novel camera)")]
             if edit_tokens:
-                model.set_hidden_tracks(edit_tokens + asset_tokens)
-                removed = model.get_outputs(batch.camera)["rgb"]
+                model.set_hidden_tracks(edit_tokens + asset_tokens + physics_actor_tokens)
+                removed = model.get_outputs(camera)["rgb"]
                 images.append(_labelled(_to_uint8(removed), f"removed {len(edit_tokens)} actor(s)"))
+            if physics_actor_tokens:
+                model.set_hidden_tracks(edit_tokens + asset_tokens)
+                physics = model.get_outputs(camera)["rgb"]
+                images.append(_labelled(_to_uint8(physics), "PyBullet pushed sim actor"))
             if replaced:
                 model.set_hidden_tracks(edit_tokens)
-                swapped = model.get_outputs(batch.camera)["rgb"]
+                swapped = model.get_outputs(camera)["rgb"]
                 images.append(_labelled(_to_uint8(swapped), "replaced with sim asset"))
             width, height = images[0].size
             columns = 2
@@ -177,7 +248,8 @@ def main() -> None:
             canvas.save(path, quality=92)
             panels.append(path)
 
-    report["num_views"] = len(indices)
+    report["num_views"] = len(render_path)
+    report["interpolate_camera_steps"] = args.interpolate_camera_steps
     report["reconstruction_psnr_mean"] = float(np.mean(psnrs)) if psnrs else None
     (args.output_dir / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({key: value for key, value in report.items() if key != "tracks"}, indent=2))
