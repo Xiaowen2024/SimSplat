@@ -64,7 +64,8 @@ def main() -> None:
             batch.static_mask = batch.static_mask.to(device)
             torch.cuda.synchronize(device)
             start = time.perf_counter()
-            prediction = model.get_outputs(batch.camera)["rgb"]
+            outputs = model.get_outputs(batch.camera)
+            prediction = outputs["rgb"]
             torch.cuda.synchronize(device)
             metrics = model.get_metrics_dict({"rgb": prediction}, batch)
             metrics["render_ms"] = 1000.0 * (time.perf_counter() - start)
@@ -78,6 +79,17 @@ def main() -> None:
                 pair = prediction.clamp(0, 1).permute(2, 0, 1)[None], batch.image.permute(2, 0, 1)[None]
                 metrics["ssim"] = float(image_metrics[0](*pair))
                 metrics["lpips"] = float(image_metrics[1](*pair))
+            if batch.lidar is not None:
+                # Geometry against held-out LiDAR at static pixels within 80 m.
+                lidar = batch.lidar.to(device)
+                u, v, target = lidar[:, 0].long(), lidar[:, 1].long(), lidar[:, 2]
+                valid = (batch.static_mask[v, u, 0] > 0.5) & (target < 80.0)
+                if bool(valid.any()):
+                    rendered, target = outputs["depth"][v[valid], u[valid], 0], target[valid]
+                    ratio = torch.maximum(rendered / target, target / rendered.clamp_min(1e-3))
+                    metrics["depth_abs_rel"] = float(((rendered - target).abs() / target).mean())
+                    metrics["depth_abs_rel_median"] = float(((rendered - target).abs() / target).median())
+                    metrics["depth_delta_1.25"] = float((ratio < 1.25).float().mean())
             measurements.append(metrics)
             if args.render_dir:
                 _save_rgb(args.render_dir / f"{index:03d}_{batch.image_name}", prediction)

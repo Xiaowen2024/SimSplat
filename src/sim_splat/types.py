@@ -49,3 +49,5 @@ class Batch:
     static_mask: torch.Tensor
     camera: Camera
     image_name: str
+    # Optional sparse LiDAR depth [N, 3]: pixel-centre u, v and camera-z depth (metres).
+    lidar: torch.Tensor | None = None

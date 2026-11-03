@@ -22,6 +22,8 @@ class FullImagePipeline(Pipeline):
         batch = self.datamanager.next_train(step)
         batch.image = self._to_device(batch.image)
         batch.static_mask = self._to_device(batch.static_mask)
+        if batch.lidar is not None:
+            batch.lidar = self._to_device(batch.lidar)
         outputs = self.model.get_outputs(batch.camera)
         return outputs, self.model.get_loss_dict(outputs, batch), self.model.get_metrics_dict(outputs, batch)
 

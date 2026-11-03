@@ -579,6 +579,19 @@ class SimSplatModel(Model):
             "raster_info": raster_info,
         }
 
+    def _lidar_depth_error(self, depth: torch.Tensor, batch: Batch) -> torch.Tensor:
+        """Mean relative depth error at LiDAR returns on static pixels (0 if none)."""
+
+        lidar = batch.lidar
+        u = lidar[:, 0].long().clamp(0, depth.shape[1] - 1)
+        v = lidar[:, 1].long().clamp(0, depth.shape[0] - 1)
+        target = lidar[:, 2]
+        valid = (batch.static_mask[v, u, 0] > 0.5) & (target < self.config.depth_loss_max_m)
+        if not bool(valid.any()):
+            return depth.sum() * 0.0
+        predicted = depth[v[valid], u[valid], 0]
+        return ((predicted - target[valid]).abs() / target[valid]).mean()
+
     @staticmethod
     def _validate_supervision(outputs: dict[str, Any], batch: Batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if "rgb" not in outputs:
@@ -625,6 +638,8 @@ class SimSplatModel(Model):
             "loss_l1": weight * (1.0 - self.config.ssim_lambda) * static_l1,
             "loss_ssim": weight * self.config.ssim_lambda * static_ssim_loss,
         }
+        if self.config.depth_loss_weight > 0 and batch.lidar is not None and "depth" in outputs:
+            losses["loss_depth"] = self.config.depth_loss_weight * self._lidar_depth_error(outputs["depth"], batch)
         if self.config.use_scale_regularization:
             excess = torch.relu(self.gauss_params["scales"] - self.max_log_scale)
             # A small soft penalty gives useful gradients before the hard cap

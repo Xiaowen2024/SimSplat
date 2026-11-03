@@ -56,4 +56,15 @@ class InputDataset:
                 f"Image {path} is {width}x{height}; camera expects {camera.width}x{camera.height}"
             )
         mask_path = self.outputs.mask_paths[index] if self.outputs.mask_paths else None
-        return Batch(image=image, static_mask=self._load_mask(mask_path, height, width), camera=camera, image_name=path.name)
+        return Batch(image=image, static_mask=self._load_mask(mask_path, height, width), camera=camera, image_name=path.name,
+                     lidar=self._load_lidar(path))
+
+    @staticmethod
+    def _load_lidar(image_path: Path) -> torch.Tensor | None:
+        """Sparse depth written by ``add_lidar_depth.py`` next to the scene's images, if any."""
+
+        path = image_path.parent.parent / "lidar_depth" / f"{image_path.stem}.npz"
+        if not path.is_file():
+            return None
+        data = np.load(path)
+        return torch.from_numpy(np.concatenate((data["uv"], data["depth"][:, None]), axis=1).astype(np.float32))

@@ -120,6 +120,8 @@ def main() -> None:
     parser.add_argument("--asset-gaussians", type=int, default=60000)
     parser.add_argument("--asset-root", type=Path, help="all look-alike assets: those not simulated are shown at rest")
     parser.add_argument("--skip-depth", action="store_true", help="do not save per-frame depth (needed only by eval_perception)")
+    parser.add_argument("--cab-camera", type=float, nargs=6, metavar=("X", "Y", "Z", "AT_X", "AT_Y", "AT_Z"),
+                        help="render from a camera fixed on the excavator: position and look-at point in frame E (dig payloads)")
     args = parser.parse_args()
 
     scene = parse_scene(load_scene_config(args.scene))
@@ -204,6 +206,54 @@ def main() -> None:
         own = model.object_to_world[:, model.track_tokens.index(item["token"])].detach().cpu().numpy()
         neighbour_photo_poses.append(look_alike_poses(own, info))
 
+    # Deformable terrain (simulate_dig.py): soil surfels for the excavated / piled
+    # cells, and the reconstruction's own ground hidden over them.
+    terrain = physics.get("terrain")
+    if terrain:
+        from scipy.ndimage import binary_dilation
+
+        from sim_splat.assets import surfels_to_gaussians
+        from sim_splat.terrain import soil_surfels
+
+        t_initial = terrain["initial"].numpy().astype(np.float64)
+        t_heights = terrain["heights"].numpy().astype(np.float64)
+        t_origin, t_resolution = terrain["origin"], float(terrain["resolution"])
+        world_from_e = terrain["world_from_e"].numpy().astype(np.float64)
+        soil = soil_surfels(t_initial, t_initial, t_origin, t_resolution)
+        terrain_index = model.add_actor("sim:terrain", surfels_to_gaussians(*soil[:3], 0.9 * t_resolution, train_config.model.sh_degree),
+                                        torch.eye(4).expand(frames, 4, 4).clone(), everywhere)
+        sim_tokens.append("sim:terrain")
+        terrain_rows = model.point_track_indices == terrain_index
+        static_rows = torch.nonzero(model.point_track_indices < 0).flatten()
+        static_means = model.gauss_params["means"][static_rows].detach().cpu().numpy().astype(np.float64)
+        ground_cache: dict[int, tuple] = {}
+
+    def terrain_frame(step: int, frame: int):
+        """Pose and refill the soil actor; return the static ground rows to hide."""
+
+        heights = t_heights[min(step, len(t_heights) - 1)]
+        points, normals, colours, visible = soil_surfels(heights, t_initial, t_origin, t_resolution)
+        gaussians = surfels_to_gaussians(points, normals, colours, 0.9 * t_resolution, train_config.model.sh_degree)
+        for name in ("means", "quats", "scales", "features_dc"):
+            model.gauss_params[name].data[terrain_rows] = gaussians[name].to(device)
+        opacity = gaussians["opacities"].to(device)
+        opacity[~torch.from_numpy(visible).to(device)] = -30.0
+        model.gauss_params["opacities"].data[terrain_rows] = opacity
+        field_to_frame = anchor[frame] @ world_from_e
+        model.object_to_world[:, terrain_index] = torch.from_numpy(field_to_frame).float().to(device)
+        if frame not in ground_cache:  # static Gaussians on the ground over the field, in field coordinates
+            inverse = np.linalg.inv(field_to_frame)
+            local = static_means @ inverse[:3, :3].T + inverse[:3, 3]
+            col = np.round((local[:, 0] - t_origin[0]) / t_resolution).astype(int)
+            row = np.round((local[:, 1] - t_origin[1]) / t_resolution).astype(int)
+            inside = (col >= 0) & (col < t_initial.shape[1]) & (row >= 0) & (row < t_initial.shape[0])
+            near = np.zeros_like(inside)
+            near[inside] = np.abs(local[inside, 2] - t_initial[row[inside], col[inside]]) < 0.4
+            ground_cache[frame] = (static_rows[torch.from_numpy(near)], row[near], col[near])
+        rows, r, c = ground_cache[frame]
+        changed = binary_dilation(np.abs(heights - t_initial) > 0.01)
+        return rows[torch.from_numpy(changed[r, c])]
+
     def neighbour_pose(item: dict, photo_poses: np.ndarray, frame: int, step: int) -> np.ndarray:
         motion = item["poses"][step].numpy().astype(np.float64) @ np.linalg.inv(item["initial_pose"].numpy().astype(np.float64))
         return anchor[frame] @ motion @ np.linalg.inv(anchor[frame]) @ photo_poses[frame]
@@ -216,6 +266,25 @@ def main() -> None:
     total = sim_frames + args.hold
     dense = _interpolate_camera_path(scene.cameras, views, inserts=max(1, int(np.ceil(total / max(len(views) - 1, 1)))))
     path = [dense[int(round(item))] for item in np.linspace(0, len(dense) - 1, total)]
+    if args.cab_camera:
+        # A camera on the excavator: above the cab, looking down the arm (the view
+        # an on-board perception stack has).  A novel view: no capture was taken here.
+        if not terrain:
+            raise ValueError("--cab-camera needs the excavator frame (a simulate_dig payload)")
+        import dataclasses
+
+        reference = scene.cameras[views[0]]
+        position, target = np.asarray(args.cab_camera[:3]), np.asarray(args.cab_camera[3:])
+        forward = (target - position) / np.linalg.norm(target - position)
+        right = np.cross(forward, (0.0, 0.0, 1.0))
+        right /= np.linalg.norm(right)
+        down = np.cross(forward, right)
+        cab_in_e = np.eye(4)
+        cab_in_e[:3, :3] = np.stack((right, down, forward), axis=1)
+        cab_in_e[:3, 3] = position
+        source = views[0]
+        cab = dataclasses.replace(reference, c2w=torch.from_numpy(anchor[source] @ world_from_e @ cab_in_e).float())
+        path = [(cab, source)] * total
 
     dataset = InputDataset(scene)
     for name in ("original", "edited", "background", "real"):
@@ -235,6 +304,7 @@ def main() -> None:
                 for item, index, photo_poses in zip(neighbours, neighbour_indices, neighbour_photo_poses):
                     model.object_to_world[:, index] = torch.from_numpy(neighbour_pose(item, photo_poses, source, at)).float().to(device)
 
+            hide_ground = terrain_frame(step, source) if terrain else None
             renders = {}
             for name, hidden in (
                 # With look-alike neighbours the background has all of them removed:
@@ -248,7 +318,13 @@ def main() -> None:
                     model.object_to_world[:, clone_index] = torch.from_numpy(simulated(0, source)).float().to(device)
                     hidden = [*sim_tokens, *hidden_tracks]
                 model.set_hidden_tracks(hidden)
+                ground_backup = None
+                if hide_ground is not None and len(hide_ground) and name != "original":
+                    ground_backup = model.gauss_params["opacities"].data[hide_ground].clone()
+                    model.gauss_params["opacities"].data[hide_ground] = -30.0
                 out = model.get_outputs(camera)
+                if ground_backup is not None:
+                    model.gauss_params["opacities"].data[hide_ground] = ground_backup
                 model.object_to_world[:, clone_index] = torch.from_numpy(simulated(step, source)).float().to(device)
                 renders[name] = out
                 Image.fromarray(_to_uint8(out["rgb"])).save(args.output_dir / name / f"{k:04d}.png")

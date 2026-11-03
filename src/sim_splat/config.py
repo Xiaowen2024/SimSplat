@@ -57,6 +57,10 @@ class ModelConfig:
     sky_initial_rgb: float = 0.7
     # Per-sensor 3x4 colour transform for multi-camera exposure differences.
     appearance_affine: bool = False
+    # Sparse LiDAR depth supervision (scene/lidar_depth/, add_lidar_depth.py):
+    # relative L1 between rendered expected depth and LiDAR at static pixels.
+    depth_loss_weight: float = 0.0
+    depth_loss_max_m: float = 80.0
 
 
 @dataclass
