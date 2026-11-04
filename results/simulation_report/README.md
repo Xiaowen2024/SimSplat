@@ -22,6 +22,11 @@ pushes the joint between two barriers; both move and the rest of the row stays p
   - A camera-driven closed loop (detect → localize → push 1.2 m) ends 4.8 cm from the goal; the oracle-state
     loop ends 5.4 cm away.
   - This takes three fixes for failures that appear only in closed loop.
+- **Geometry.** Photos alone give good images over wrong depth. Adding LiDAR depth supervision reduces depth error
+  about 7× (median AbsRel 0.14 → 0.02) for −0.4 dB PSNR. It roughly halves the failed asset fits and cuts
+  localization error from 0.45 to 0.29 m.
+- **Terrain.** On an off-road site (RELLIS-3D) the excavator digs a trench in a height-field soil model rendered into
+  the reconstruction, then pushes a barrier. The cut soil was never photographed, so its look has to be authored.
 - **Recommendation.**
   - Use neural rendering for everything the autonomy stack only *looks at*: background, terrain appearance, parked
     equipment.
@@ -95,7 +100,44 @@ a time. PSNR on held-out views; *static* means pixels outside annotated objects.
 
 ### 1.2 Temporal consistency and speed
 
-TBD.
+A simulator replays sequences, so a render must not flicker. `eval_temporal.py` takes 60 consecutive front-camera
+frames and checks each pair:
+1. lift every pixel of frame t+1 with the rendered depth;
+2. move it into frame t with the known poses;
+3. compare colours. The score is the mean absolute RGB residual (0–255) on unoccluded pixels.
+
+The same warp is applied to the real photos as a reference. Their residual includes exposure changes, moving traffic
+and warp error. A renderer is consistent when its residual is well below the photos' residual.
+
+**Setup:** RTX 3080 Ti, idle GPU, 800 × 450 (nuScenes) and 960 × 600 (RELLIS), median frame time.
+
+| Scene | Renderer | Warp residual ↓ | FPS | Gaussians |
+| --- | --- | --- | --- | --- |
+| 0061 | *real photos* | *6.51* | — | — |
+| | vanilla 3DGS | 3.91 | 157 | 1.08 M |
+| | ours, 30k | 3.43 | 93 | 1.16 M |
+| | ours, 50k | 3.84 | 86 | 1.30 M |
+| | ours, 50k + LiDAR depth | **3.07** | 83 | 1.31 M |
+| 0553 | *real photos* | *2.96* | — | — |
+| | vanilla 3DGS | 0.14† | 327 | 1.04 M |
+| | ours, 30k / 50k | 0.94 / 1.05 | 176 / 165 | 0.66 / 0.69 M |
+| 0757 (traffic) | *real photos* | *5.25* | — | — |
+| | vanilla 3DGS | 5.17 | 108 | 1.60 M |
+| | ours, 30k / 50k | **3.05** / 3.14 | 69 / 62 | 1.69 / 1.83 M |
+| RELLIS (off-road) | *real photos* | *9.54* | — | — |
+| | ours, no depth loss | 1.35 | 253 | 0.15 M |
+| | ours + LiDAR depth | **1.06** | 218 | 0.16 M |
+
+- **No renderer flickers more than reality.** All residuals are at or below the real photos' residual.
+- **Vanilla 3DGS flickers in traffic.** In 0757 its residual (5.17) is as large as the photos'. Moving cars have no
+  actor, so they are baked as view-dependent smears that change from frame to frame. Rigid actors cut it to 3.05.
+- **Depth supervision makes frames more consistent** (0061: 3.84 → 3.07; RELLIS: 1.35 → 1.06). The colours now sit
+  on the right surface, so reprojecting them holds.
+- **Speed.** Everything is real-time at camera resolution. The scene graph costs 1.5–2× vanilla's frame time: per-actor
+  transforms, the sky pass and more Gaussians.
+
+† Not yet explained. The metric uses each renderer's own depth, so a renderer whose depth is wrong in a smooth way can
+score well. The depth-error metrics (§2) are the check for that.
 
 ### 1.3 Does fidelity transfer to perception?
 
@@ -201,8 +243,79 @@ Each of these was found by a measurement, not by eye alone.
 | The asset shows through a half-transparent veil | strict crop PSNR + a green-asset test | Inpainting: only Gaussians *behind* the asset learn the fill | Hidden pixels 27–48% → 4–11% |
 | Neighbours start sunk in or floating (±21 cm) and pop at t = 0 | idle-control simulation | Snap simulated bodies to the ground; render only their simulated *motion* on the photo-fitted pose; shrink annotation colliders; 1 s settle | Idle drift 6–9 cm → ~1e-10 m |
 | Closed loop topples the barrier, loses it, or stops short | closed loop vs oracle (§1.4) | Predicted-box gating + 0.5 m clearance + surface → centre | Fail → 4.8 cm, oracle 5.4 cm |
+| Rendered depth is wrong although the images are good (photometric loss only) | LiDAR depth error; depth-only asset fits; localization error (§1.3) | LiDAR depth supervision (§2.1) | Depth error 0.14 → 0.02 (median AbsRel); depth-fit flags 40 → 22 of 64 |
 | Wrong prompt: the whole row (and the excavator) boxed as "road barrier" | closed loop | Prompt "an orange plastic barrier." | — |
 | Rendered panel captioned "original scene" | demo GIF | Variable shadowing in `render_physics` | — |
+
+### 2.1 Fix in depth: LiDAR depth supervision
+
+The reconstruction is trained on photos only, so nothing makes its depth correct. Its images can be good while its
+geometry is fog along the viewing rays. Three earlier measurements traced back to that:
+- the depth-only asset fit flagged 40 of 64 barriers;
+- localization from rendered depth was off by 0.45 m;
+- the ablation renderers' depth error did not follow PSNR (§1.3).
+
+**Fix:**
+- project the LiDAR sweep nearest in time into each image (`add_lidar_depth.py`);
+- drop returns hidden behind nearer ones (the LiDAR sits higher than the camera, so it sees past occluders);
+- add a relative L1 loss on rendered depth at static pixels, weight 0.1.
+
+Scene 0061, 50k steps, same model otherwise:
+
+| | without | with LiDAR depth |
+| --- | --- | --- |
+| Depth AbsRel vs held-out LiDAR, mean / median ↓ | 0.216 / 0.141 | **0.068 / 0.020** |
+| Depth within 25% of LiDAR (δ < 1.25) | 68% | **92%** |
+| PSNR / LPIPS | **23.59 / 0.388** | 23.15 / 0.398 |
+| Depth-only asset fit: barriers flagged | 40 of 64 | **22 of 64** |
+| Fitted height / annotated height, median | 0.54 | **0.81** (the photo-mask fit gives ≈ 0.85) |
+| Localization error from rendered depth, median | 0.45 m | **0.29 m** |
+| Detector outcome same as on the photo | 92.4% | **94.1%** |
+| Temporal warp residual | 3.84 | **3.07** |
+
+On RELLIS-3D (off-road, §2.2) the same loss takes depth AbsRel from 0.161 to **0.045** and δ < 1.25 from 71% to 97%,
+at −0.26 dB PSNR.
+
+**Trade-off:** about 0.3–0.4 dB PSNR for depth that is roughly 3–7× more accurate. For a simulator that is the right
+trade. Every downstream geometric use improves: asset fitting, localization, temporal consistency and the terrain
+surface. The photometric loss alone cannot see the error.
+
+### 2.2 Construction scene: deformable terrain on an off-road site (RELLIS-3D)
+
+nuScenes is paved road. To test digging on real soil, the same pipeline runs on **RELLIS-3D** sequence 00001: an
+off-road trail of dirt ruts and grass, one camera, an Ouster LiDAR and SLAM poses.
+- `convert_rellis.py` builds the scene: 300 frames, undistorted, with LiDAR depth.
+- RELLIS has no annotations, so an authored barrier marks the work zone.
+
+The site was picked from data: flat, LiDAR-covered ground beside the trail, seen by about 50 views at 7–20 m.
+
+**Soil model** (`terrain.py`). The bucket's motion comes from MuJoCo; the soil is kinematic.
+- **Height field:** 5 cm cells, initialized from LiDAR.
+- **Cut:** soil above the bucket bottom goes into the bucket, up to its capacity.
+- **Dump:** the load is spilled as a mound.
+- **Settle:** slopes relax to the angle of repose.
+- **Rendering:** fixed-size surfel slots, so the soil updates in place without flicker. The reconstructed ground
+  Gaussians over changed cells are hidden.
+
+**Scripted job** (`simulate_dig.py`): four passes dig a trench, then the bucket pushes the barrier out of the way. The
+barrier is a MuJoCo rigid body.
+
+| Trench depth | Trench area | Excavated | Volume balance | Barrier pushed | Barrier tilt |
+| --- | --- | --- | --- | --- | --- |
+| 0.63 m | 2.78 m² | 0.66 m³ | ~1e-16 m³ | 0.60 m | 3.6° (upright) |
+
+RELLIS_FIGURE_PLACEHOLDER
+
+**Findings:**
+- **Newly exposed soil has no photos.** The cut surface was never photographed, so its appearance has to be authored
+  (here: a measured soil colour, shading and depth darkening). This is a hard limit of reconstruction for any
+  machine that changes the scene.
+  - The fix that scales is a *material library*: soil textures captured once per site type and applied by the soil
+    model.
+- **The ground must have the right depth** for the hidden-ground swap to work: only Gaussians near the true ground
+  are removed. Without LiDAR depth the ground Gaussians are spread along the viewing rays, so the swap would be expected to leave some of them over the trench or cut holes elsewhere (not measured separately).
+- **Off-road needs denser Gaussians.** Grass and ruts are high-frequency. With the road-tuned densification threshold
+  the model had 155k Gaussians and LPIPS 0.60. RELLIS_DENSE_PLACEHOLDER
 
 ### Construction-specific challenges: status
 
@@ -210,7 +323,7 @@ Each of these was found by a measurement, not by eye alone.
 | --- | --- |
 | Dynamic objects | Done: per-track rigid actors; moving actors removed or replaced |
 | Harsh lighting | *Partly.* Lighting is baked into the Gaussians and the assets, so pushed assets keep their original shading and cast no new shadow. The missing contact shadow between abutting barriers is the main remaining perception gap (row merging 93% vs 84%) |
-| Deformable terrain | Not yet. Plan: a MuJoCo height field under the bucket, with ground Gaussians displaced by the same field |
+| Deformable terrain | *Done, kinematic* (§2.2). Height-field soil (cut, dump, angle of repose, volume conserved) driven by the MuJoCo bucket. It is rendered into the reconstruction on an off-road RELLIS-3D site. Soil reaction forces on the bucket are not modelled |
 | Dust | Not yet. Plan: participating-medium Gaussians or screen-space dust, evaluated by detector degradation against real dusty frames |
 
 ## 3. Recommendation: where neural rendering should (and should not) replace sim assets
@@ -234,7 +347,9 @@ Each of these was found by a measurement, not by eye alone.
   merges rows of barriers. A driving-trained 3D detector would be the real test.
 - **Lighting is baked.** There are no relighting, cast shadows or time-of-day changes.
 - **The excavator is untextured boxes.** Its appearance is not part of the evaluation.
-- **One work zone.** The scene is a road work zone from nuScenes, not an excavation site.
+- **No real excavation site.** The scenes are a nuScenes road work zone and an off-road trail (RELLIS-3D). Neither has real
+  machines or freshly dug soil to compare against.
+- **Soil is kinematic.** The bucket does not feel the soil, and the cut surface's appearance is authored.
 
 ## Reproduce
 

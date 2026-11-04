@@ -116,7 +116,7 @@ def main() -> None:
                         stats[source]["l1"].append(float(difference[static].mean()))
                     if objects.sum() > 200:
                         stats[source]["l1_objects"].append(float(difference[objects].mean()))
-                    masked = lambda image: torch.where(valid[..., None], image, torch.zeros_like(image))  # noqa: E731
+                    masked = lambda image: torch.where(valid[..., None], image.clamp(0, 1), torch.zeros_like(image))  # noqa: E731
                     stats[source]["lpips"].append(float(lpips(masked(warped).permute(2, 0, 1)[None], masked(current[key]).permute(2, 0, 1)[None])))
         summarise = lambda values: float(np.mean(values)) if values else None  # noqa: E731
         results[name] = {"warp_l1": summarise(stats["render"]["l1"]), "warp_l1_objects": summarise(stats["render"]["l1_objects"]),
