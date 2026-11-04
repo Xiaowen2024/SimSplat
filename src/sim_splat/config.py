@@ -61,6 +61,9 @@ class ModelConfig:
     # relative L1 between rendered expected depth and LiDAR at static pixels.
     depth_loss_weight: float = 0.0
     depth_loss_max_m: float = 80.0
+    # Per-image SE(3) pose correction learned with the scene (training views only):
+    # absorbs pose / sync / calibration error that otherwise blurs the reconstruction.
+    pose_refine: bool = False
 
 
 @dataclass
@@ -77,6 +80,7 @@ class GaussianOptimizerConfig:
     final_lr_ratio: float = 0.1
     sky_lr: float = 1.0e-2
     appearance_lr: float = 1.0e-3
+    pose_lr: float = 5.0e-4
 
 
 @dataclass

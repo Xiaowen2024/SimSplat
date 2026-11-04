@@ -211,3 +211,24 @@ def test_add_actor_appends_rows_and_pose_track() -> None:
     assert model.point_track_indices.tolist()[-2:] == [1, 1]
     means, _, _, _ = model._composed_gaussians(1)
     torch.testing.assert_close(means[-1], torch.tensor([10.0, 0.0, 0.0]))
+
+
+def test_pose_refinement_applies_only_in_training_mode():
+    scene = _scene()
+    model = SimSplatModel(ModelConfig(sh_degree=0, pose_refine=True), scene, device="cpu")
+    c2w = torch.eye(4)
+    c2w[:3, 3] = torch.tensor([1.0, 2.0, 3.0])
+    camera = Camera(c2w=c2w, K=torch.eye(3), width=4, height=4, image_id=0)
+    assert "pose" in model.extra_parameters()
+    assert torch.allclose(model.refined_c2w(camera), camera.c2w)  # starts at zero correction
+    with torch.no_grad():
+        model.pose_delta[camera.image_id] = torch.tensor([0.0, 0.0, 0.1, 0.2, 0.0, 0.0])
+    model.train()
+    refined = model.refined_c2w(camera)
+    assert not torch.allclose(refined, camera.c2w)
+    assert torch.allclose(refined[:3, :3].T @ refined[:3, :3], torch.eye(3), atol=1e-5)  # still a rotation
+    assert torch.allclose(refined[:3, 3], camera.c2w[:3, 3] + 0.2 * camera.c2w[:3, 0], atol=1e-5)
+    model.eval()
+    assert torch.allclose(model.refined_c2w(camera), camera.c2w)
+    model.refine_captured_views = True  # scoring training views
+    assert not torch.allclose(model.refined_c2w(camera), camera.c2w)

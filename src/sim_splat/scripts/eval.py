@@ -44,6 +44,7 @@ def main() -> None:
     model = SimSplatModel(train_config.model, outputs, train_config.device)
     checkpoint_step = load_model_weights(args.checkpoint, model, train_config.device)
     model.eval()
+    model.refine_captured_views = args.split == "train"  # learned pose corrections exist only for training views
     device = torch.device(train_config.device)
     if args.render_dir:
         args.render_dir.mkdir(parents=True, exist_ok=True)

@@ -52,7 +52,7 @@ def build_extra_optimizers(model: SimSplatModel, config: GaussianOptimizerConfig
     strategies require params and optimizers to share exactly the same keys.
     """
 
-    learning_rates = {"sky": config.sky_lr, "appearance": config.appearance_lr}
+    learning_rates = {"sky": config.sky_lr, "appearance": config.appearance_lr, "pose": config.pose_lr}
     return {
         name: torch.optim.Adam(
             [{"params": [parameter], "lr": learning_rates[name], "initial_lr": learning_rates[name], "name": name}],

@@ -234,6 +234,9 @@ class SimSplatModel(Model):
             self.appearance = nn.Parameter(identity.repeat(sensor_count, 1, 1))
         else:
             self.appearance = None
+        # [images, 6]: axis-angle rotation and translation, in each camera's own frame.
+        self.pose_delta = nn.Parameter(torch.zeros(len(scene.image_paths), 6)) if config.pose_refine else None
+        self.refine_captured_views = False
         self.to(self.device)
 
     # ------------------------------------------------------------------
@@ -421,7 +424,29 @@ class SimSplatModel(Model):
             extras["sky"] = self.sky.texture
         if self.appearance is not None:
             extras["appearance"] = self.appearance
+        if self.pose_delta is not None:
+            extras["pose"] = self.pose_delta
         return extras
+
+    def refined_c2w(self, camera: Camera) -> torch.Tensor:
+        """``camera.c2w`` with its learned correction.  Applied in training, and in
+        evaluation only when ``refine_captured_views`` is set (scoring training
+        views): novel cameras built from a captured one keep its ``image_id`` but
+        must not inherit its correction."""
+
+        c2w = camera.c2w.to(device=self.device, dtype=torch.float32)
+        if self.pose_delta is None or not (self.training or self.refine_captured_views) \
+                or not 0 <= camera.image_id < self.pose_delta.shape[0]:
+            return c2w
+        delta = self.pose_delta[camera.image_id]
+        w = delta[:3]
+        theta = torch.sqrt((w * w).sum() + 1e-12)
+        k = w / theta
+        zero = torch.zeros((), device=self.device)
+        cross = torch.stack((torch.stack((zero, -k[2], k[1])), torch.stack((k[2], zero, -k[0])), torch.stack((-k[1], k[0], zero))))
+        rotation = torch.eye(3, device=self.device) + torch.sin(theta) * cross + (1 - torch.cos(theta)) * cross @ cross
+        correction = torch.cat((torch.cat((rotation, delta[3:, None]), 1), torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=self.device)), 0)
+        return c2w @ correction
 
     def set_step(self, step: int) -> None:
         """Standard 3DGS schedule: one more SH band every ``sh_degree_interval`` steps."""
@@ -528,7 +553,7 @@ class SimSplatModel(Model):
 
         means, quats, visible, local_to_world = self._composed_gaussians(camera.image_id)
         dtype = means.dtype
-        c2w = camera.c2w.to(device=self.device, dtype=dtype)
+        c2w = self.refined_c2w(camera).to(dtype)
         K = camera.K.to(device=self.device, dtype=dtype)
         colors = self._gaussian_colors(means, local_to_world, c2w[:3, 3])
         # Hidden or not-yet-visible actors keep their rows (and therefore
