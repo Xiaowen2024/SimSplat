@@ -124,7 +124,29 @@ The scenes are scored with an off-the-shelf open-vocabulary detector:
 detector boxes the orange barrier alone (IoU 0.81). On both renders it merges it with the neighbour, because the
 dark seam between abutting barriers is softer.*
 
-Renderers of different fidelity on the same views (vanilla 3DGS, ablations): TBD.
+**Does better fidelity mean better transfer?** Same 370 pairs, rendered by every model of the ablation (unedited
+reconstructions, no assets):
+
+| Renderer (0061) | crop PSNR | crop LPIPS ↓ | Same outcome as real | Sim gap | Recall @0.3 | Rows merged | Depth error, median |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| vanilla 3DGS (30k) | 23.12 | 0.307 | 90.0% | 8.4% | 21.1% | 92% | 0.38 m |
+| − rigid actors (30k) | 23.38 | 0.305 | 91.4% | 7.3% | 22.2% | 89% | 0.53 m |
+| − sky (30k) | 24.60 | 0.214 | 93.5% | 5.7% | 23.2% | 92% | 0.39 m |
+| − per-camera colour (30k) | 24.70 | 0.227 | 93.5% | 5.9% | 21.9% | 91% | 0.48 m |
+| full (30k) | 24.80 | 0.223 | 93.2% | 6.2% | 20.8% | 92% | 0.51 m |
+| full (50k) | **25.36** | **0.196** | 92.4% | 6.8% | 21.1% | 92% | 0.45 m |
+| *real photo* | — | — | — | — | 27.6% | 84% | 0.47 m* |
+
+- **Fidelity helps, but saturates.** Going from vanilla to any model with LPIPS ≤ 0.23 cuts the sim gap from 8.4% to
+  about 6%. Beyond that, a further 0.6 dB and 0.03 LPIPS buy nothing. One pair is 0.27 points, so the differences
+  among the top four rows are noise.
+- **The remaining gap is structural, not photometric.** Every renderer merges rows of barriers more often than the
+  photo (89–92% vs 84%), and recall @0.3 is stuck at 21–23% vs 27.6%. That is the missing seam shadow of §1.3, which
+  more training does not recover.
+- **Depth error does not follow PSNR.** Localization from rendered depth is best for vanilla 3DGS (0.38 m), whose
+  images are the worst. A likely reason (not verified) is that its depth is smoother, so the median over a box is
+  less contaminated by background. This is why rendered depth needs its own supervision (§2, LiDAR depth).
+- Speed is the cost: 224 FPS (vanilla) vs 91–120 FPS with actors and sky (shared GPU; see §1.2).
 
 ### 1.4 Closed loop
 
