@@ -22,7 +22,8 @@ pushes the joint between two barriers; both move and the rest of the row stays p
   - A camera-driven closed loop (detect → localize → push 1.2 m) ends 4.8 cm from the goal; the oracle-state
     loop ends 5.4 cm away.
   - This takes three fixes for failures that appear only in closed loop.
-- **Geometry.** Photos alone give good images over wrong depth. Adding LiDAR depth supervision reduces depth error
+- **Geometry.** Photos alone give good images over wrong depth: rendered as a simulated LiDAR, 56% of its obstacle
+  cells are phantoms. With LiDAR depth supervision that drops to 20% (13% off-road). Adding LiDAR depth supervision reduces depth error
   about 7× (median AbsRel 0.14 → 0.02) for −0.4 dB PSNR. It roughly halves the failed asset fits and cuts
   localization error from 0.45 to 0.29 m.
 - **Terrain.** On an off-road site (RELLIS-3D) the excavator digs a trench in a height-field soil model rendered into
@@ -288,6 +289,37 @@ gradient and the kerb line of barriers is a sharp depth edge.*
 *RELLIS-3D trail. With photos only, the grass ground is patchy and its depth flickers between nearby values. With
 LiDAR it matches the scan. The RGB barely changes (the ruts are slightly crisper); the blur is the separate
 underfitting problem of §2.2.*
+
+**Downstream task: the simulated depth sensor.** A simulator that renders depth is also a LiDAR simulator. On every
+held-out view, rendered depth is sampled on exactly the real LiDAR's rays, and the same small stack runs on both scans
+(`eval_lidar_tasks.py`):
+1. ground plane by RANSAC (from the real scan);
+2. obstacles are 0.3–3 m above it;
+3. bird's-eye occupancy in 0.5 m cells, the input an excavator's safety layer stops on.
+
+| | Phantom obstacles ↓ | Missed obstacles ↓ | Occupancy IoU | Ground height error, median | Ground rays off by > 10 cm |
+| --- | --- | --- | --- | --- | --- |
+| 0061, vanilla 3DGS | 63% | 46% | 0.11 | 28 cm | 80% |
+| 0061, ours (photo loss) | 56% | 40% | 0.13 | 18 cm | 70% |
+| 0061, ours + LiDAR depth | **20%** | **20%** | **0.31** | **2.1 cm** | **8%** |
+| RELLIS, photo loss | 52% | 36% | 0.15 | 13 cm | 60% |
+| RELLIS, + LiDAR depth | **13%** | **12%** | **0.38** | **2.5 cm** | **6%** |
+
+*Phantom: a simulated occupied cell with no real one within one cell. 29 / 38 held-out views.*
+
+- **Trained on photos only, the simulated sensor is unusable for safety.** More than half of its obstacle cells are
+  phantoms, so a machine tested in this simulator would brake for nothing. On RELLIS the trail itself, right in front
+  of the vehicle, becomes an obstacle (figure below). In the camera image none of this is visible.
+- **With LiDAR depth, phantoms fall 3–4×, misses fall 2–3×, and the ground is right to about 2 cm.** That is the
+  accuracy excavation depth, object placement and the hidden-ground swap need.
+
+![](occupancy_rellis.jpg)
+
+![](occupancy_0061.jpg)
+
+*Bird's-eye occupancy, camera at the yellow arrow. White: real obstacle cells; green: simulated and real; red:
+phantom; blue: missed. Top: RELLIS trail, photo loss vs + LiDAR depth. Bottom: 0061, vanilla 3DGS vs ours vs ours +
+LiDAR depth. The phantom clusters on the road in front of the car disappear.*
 
 **Trade-off:** about 0.3–0.4 dB PSNR for depth that is roughly 3–7× more accurate. For a simulator that is the right
 trade. Every downstream geometric use improves: asset fitting, localization, temporal consistency and the terrain
