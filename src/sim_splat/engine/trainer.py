@@ -59,7 +59,9 @@ class Trainer:
 
         progress = min(step / max(self.config.max_steps - 1, 1), 1.0)
         multiplier = self.config.optimizer.final_lr_ratio**progress
-        for optimizer in self.optimizers.values():
+        for name, optimizer in self.optimizers.items():
+            if self.config.optimizer.decay_means_only and name != "means":
+                continue
             for group in optimizer.param_groups:
                 group["lr"] = group["initial_lr"] * multiplier
 

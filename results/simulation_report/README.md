@@ -376,13 +376,62 @@ soil height field (trench and spoil pile) and the pushed barrier.*
     The real photos' own warp residual (9.5) is 2–3× nuScenes'.
   - Handling this needs a per-image appearance/transient model, or masking vegetation from the loss.
 
+### 2.3 Soil that pushes back: cutting forces, hydraulic limits, load-adaptive digging
+
+In §2.2 the bucket cut the soil kinematically: it moved through clay as easily as through sand. A dig simulator has
+to make the machine *feel* the soil, so that a controller can fail in it.
+
+**What was added** (`terrain.py`, `simulate_dig.py --soil`):
+- **Cutting force: the Fundamental Earthmoving Equation (McKyes).** The force on a flat tool of width w cutting at
+  depth d is (γ d² N_γ + c d N_c + c_a d N_a) w. The failure-plane angle is chosen to minimize the force. The force is
+  applied to the MuJoCo bucket every step, at the cutting edge.
+  - *Test:* for a smooth vertical tool in cohesionless soil it reduces to Rankine's passive pressure ½ γ d² K_p w.
+- **Floor bearing capacity** (Terzaghi with Vesić factors). The floor below the planned cut is a unilateral contact up
+  to that capacity, so a stalled arm cannot drive the bucket down into the trench floor.
+  - *Test:* for undrained clay it equals Prandtl's (2 + π) c.
+- **Hydraulic limits.**
+  - Joint servos are stiff (hydraulics hold position until the relief valve opens) and torque-limited to
+    100 / 50 / 30 kN m (boom / stick / bucket).
+  - A force probe at digging poses gives an arm capacity of **25–33 kN**, which I take as a midi-excavator class.
+- **Three soils,** typical textbook values (not measured): loose sand, loam, stiff clay. At 0.2 m depth they resist
+  with 2.7 / 16 / 37 kN.
+- **Load-adaptive controller:** while the cutting force exceeds 20 kN, hold the drag and lift the bucket; resume and
+  return to the planned depth once the load drops. This is the basic behaviour of force-based autonomous excavation.
+
+**Job:** dig the RELLIS trench to 0.48 m, in passes of 0.12 or 0.24 m, maximum 12 passes.
+
+| Soil | Pass | Controller | Passes | Time | Depth reached | Stalled (lag > 10 cm) | Cutting energy |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| sand | 0.24 m | fixed | 2 | 16 s | 0.48 m | 0% | 12 kJ/m³ |
+| loam | 0.24 m | fixed | 2 | 16 s | 0.48 m | 0% | 69 kJ/m³ |
+| clay | 0.12 m | fixed | 4 | 31 s | 0.49 m | 0% | 165 kJ/m³ |
+| clay | 0.24 m | fixed | 12 (max) | 95 s | **0.36 m ✗** | **76%** | 489 kJ/m³ |
+| clay | 0.24 m | **load-adaptive** | **4** | **34 s** | **0.49 m ✓** | **0%** | 303 kJ/m³ |
+
+![](soil_clay_fixed_vs_adaptive.png)
+
+*Stiff clay, 0.24 m passes. The fixed path pushes the bucket into more soil than the arm can cut (force above the grey
+capacity band), stalls, and gains a few cm per pass. The final dump's settling then caves the trench walls in (0.48 →
+0.36 m). The load-adaptive controller keeps the force near its 20 kN threshold and finishes in 4 passes.*
+
+- **The simulator now separates soils.** Sand and loam are dug in 2 passes at either depth. Stiff clay at 0.24 m
+  passes stalls the arm three quarters of the time and never reaches depth.
+- **A controller that is fine in sand fails in clay, and a simple force-feedback fix recovers it.** This is the kind of
+  difference a dig simulator has to expose before a machine meets it in the field.
+- **Energy per m³ follows soil strength** (12 → 69 → 165+ kJ/m³). Stalling wastes energy: 489 vs 303 kJ/m³ in clay.
+- **Limits.**
+  - The soil parameters are textbook values and the bucket is a flat plate (no teeth, no curl).
+  - Penetration while plunging is not modelled.
+  - The forces have not been calibrated against a real machine: they are only as right as the FEE and the
+    parameters. Calibrating them needs bucket-load logs from the fleet.
+
 ### Construction-specific challenges: status
 
 | Challenge | Status |
 | --- | --- |
 | Dynamic objects | Done: per-track rigid actors; moving actors removed or replaced |
 | Harsh lighting | *Partly.* Lighting is baked into the Gaussians and the assets, so pushed assets keep their original shading and cast no new shadow. The missing contact shadow between abutting barriers is the main remaining perception gap (row merging 93% vs 84%) |
-| Deformable terrain | *Done, kinematic* (§2.2). Height-field soil (cut, dump, angle of repose, volume conserved) driven by the MuJoCo bucket. It is rendered into the reconstruction on an off-road RELLIS-3D site. Soil reaction forces on the bucket are not modelled |
+| Deformable terrain | *Done* (§2.2, §2.3). Height-field soil (cut, dump, angle of repose, volume conserved) rendered into the reconstruction on an off-road RELLIS-3D site. Soil pushes back with FEE cutting forces and floor bearing capacity, against torque-limited hydraulics. Parameters are textbook values, not calibrated |
 | Dust | Not yet. Plan: participating-medium Gaussians or screen-space dust, evaluated by detector degradation against real dusty frames |
 
 ## 3. Recommendation: where neural rendering should (and should not) replace sim assets
@@ -408,7 +457,7 @@ soil height field (trench and spoil pile) and the pushed barrier.*
 - **The excavator is untextured boxes.** Its appearance is not part of the evaluation.
 - **No real excavation site.** The scenes are a nuScenes road work zone and an off-road trail (RELLIS-3D). Neither has real
   machines or freshly dug soil to compare against.
-- **Soil is kinematic.** The bucket does not feel the soil, and the cut surface's appearance is authored.
+- **Soil forces are uncalibrated.** Textbook soil parameters, flat-plate bucket; the cut surface's appearance is authored.
 
 ## Reproduce
 

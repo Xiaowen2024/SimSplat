@@ -78,6 +78,9 @@ class GaussianOptimizerConfig:
     # Exponential decay prevents a few early, high-gradient frames from
     # permanently inflating Gaussians in sparse or dynamic sequences.
     final_lr_ratio: float = 0.1
+    # Original 3DGS decays only the position learning rate.  Decaying colour, opacity and
+    # scale too (False, the historical default here) freezes them late and underfits.
+    decay_means_only: bool = False
     sky_lr: float = 1.0e-2
     appearance_lr: float = 1.0e-3
     pose_lr: float = 5.0e-4

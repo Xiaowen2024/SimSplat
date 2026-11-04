@@ -137,6 +137,72 @@ class SoilField:
         return np.abs(self.heights - self.initial) > tolerance
 
 
+@dataclass(frozen=True)
+class SoilParams:
+    """Soil strength for the cutting-force model (SI units)."""
+
+    name: str
+    unit_weight: float  # N/m^3 (density x g)
+    cohesion: float  # Pa
+    friction_deg: float  # internal friction angle
+    tool_friction_deg: float  # soil-steel friction angle
+    adhesion: float  # Pa, soil-steel
+    surcharge: float = 0.0  # Pa on the soil surface ahead of the tool
+
+
+# Typical textbook values (McKyes 1985 ranges); not measured on any site.
+SOILS = {
+    "sand": SoilParams("loose dry sand", 1600 * 9.81, 0.0, 35.0, 24.0, 0.0),
+    "loam": SoilParams("loam", 1800 * 9.81, 10e3, 30.0, 20.0, 5e3),
+    "clay": SoilParams("stiff clay", 2000 * 9.81, 40e3, 20.0, 15.0, 20e3),
+}
+
+
+def cutting_force(depth: float, width: float, soil: SoilParams, rake_deg: float = 90.0) -> dict:
+    """Fundamental Earthmoving Equation (McKyes) for a flat tool cutting at ``depth``.
+
+    F = (gamma d^2 N_gamma + c d N_c + q d N_q + c_a d N_a) w, with the failure-plane
+    angle rho chosen to minimise F (passive failure).  F acts at ``tool friction``
+    from the tool normal; ``horizontal`` resists the motion, ``vertical_up`` is the
+    vertical component on the tool (positive: lifts it).  For a vertical, smooth tool
+    in cohesionless soil this reduces to Rankine's passive pressure
+    0.5 gamma d^2 K_p w, K_p = tan^2(45 + phi/2).
+    """
+
+    if depth <= 0.0:
+        return {"total": 0.0, "horizontal": 0.0, "vertical_up": 0.0, "rho_deg": float("nan")}
+    beta, delta, phi = np.radians(rake_deg), np.radians(soil.tool_friction_deg), np.radians(soil.friction_deg)
+    rho = np.radians(np.linspace(5.0, 85.0, 801))
+    rho = rho[rho + phi < np.pi - 1e-3]
+    cot = lambda angle: 1.0 / np.tan(angle)  # noqa: E731
+    denominator = np.cos(beta + delta) + np.sin(beta + delta) * cot(rho + phi)
+    valid = denominator > 1e-6
+    rho, denominator = rho[valid], denominator[valid]
+    n_gamma = (cot(beta) + cot(rho)) / (2.0 * denominator)
+    n_c = (1.0 + cot(rho) * cot(rho + phi)) / denominator
+    n_q = (cot(beta) + cot(rho)) / denominator
+    n_a = (1.0 - cot(beta) * cot(rho + phi)) / denominator
+    force = (soil.unit_weight * depth**2 * n_gamma + soil.cohesion * depth * n_c + soil.surcharge * depth * n_q
+             + soil.adhesion * depth * n_a) * width
+    best = int(np.argmin(force))
+    total = float(force[best])
+    return {"total": total, "horizontal": total * float(np.sin(beta + delta)), "vertical_up": -total * float(np.cos(beta + delta)),
+            "rho_deg": float(np.degrees(rho[best]))}
+
+
+def bearing_capacity(soil: SoilParams, width: float, length: float) -> float:
+    """Ultimate bearing force (N) of a ``width`` x ``length`` footing at the surface
+    (Terzaghi with Vesic's factors): q = c N_c + 0.5 gamma B N_gamma, times the area.
+    It resists the bucket being pushed *down* into the trench floor."""
+
+    phi = np.radians(soil.friction_deg)
+    n_q = np.exp(np.pi * np.tan(phi)) * np.tan(np.pi / 4 + phi / 2) ** 2
+    n_c = (n_q - 1.0) / np.tan(phi) if phi > 1e-6 else 2.0 + np.pi
+    n_gamma = 2.0 * (n_q + 1.0) * np.tan(phi)
+    breadth = min(width, length)
+    return float((soil.cohesion * n_c + 0.5 * soil.unit_weight * breadth * n_gamma) * width * length)
+
+
 SOIL_RGB = np.array((0.58, 0.45, 0.32))  # moist sub-base soil; never photographed, so authored
 CRUST_RGB = np.array((0.36, 0.36, 0.35))  # cut edge of the pavement layer
 

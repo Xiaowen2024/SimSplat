@@ -99,7 +99,8 @@ class ExcavatorWorld:
     def __init__(self, scene: Path, track: str | None, *, asset: Path | None = None, asset_dir: Path | None = None,
                  site: np.ndarray | None = None,
                  asset_height: float = 0.95, asset_mass: float = 15.0, friction: float = 0.8, push_sign: float = 1.0, push_axis: str = "x",
-                 lateral_offset: float = 0.0, standoff: float = 3.6, collider_radius: float = 4.0, neighbour_dirs: list[Path] | tuple = ()) -> None:
+                 lateral_offset: float = 0.0, standoff: float = 3.6, collider_radius: float = 4.0, neighbour_dirs: list[Path] | tuple = (),
+                 torque_limits: tuple[float, float, float] = (1e6, 1e6, 1e6), servo_gain: float = 1.0) -> None:
         import mujoco
         import trimesh
 
@@ -249,13 +250,13 @@ class ExcavatorWorld:
     {_box("cab", (-0.2, 0, 1.0), (0.7, 0.7, 0.4), YELLOW, 'contype="0" conaffinity="0"')}
     {_box("cabin", (0.0, 0.35, 1.7), (0.45, 0.32, 0.3), GREY, 'contype="0" conaffinity="0"')}
     <body name="boom" pos="{PIVOT[0]} 0 {PIVOT[1]}">
-      <joint name="boom" type="hinge" axis="0 1 0" damping="20000" ref="0"/>
+      <joint name="boom" type="hinge" axis="0 1 0" damping="{20000}" ref="0"/>
       {_box("boom", (BOOM / 2, 0, 0), (BOOM / 2, 0.15, 0.18), YELLOW, arm)}
       <body name="stick" pos="{BOOM} 0 0">
-        <joint name="stick" type="hinge" axis="0 1 0" damping="10000"/>
+        <joint name="stick" type="hinge" axis="0 1 0" damping="{10000}"/>
         {_box("stick", (STICK / 2, 0, 0), (STICK / 2, 0.11, 0.13), YELLOW, arm)}
         <body name="bucket" pos="{STICK} 0 0">
-          <joint name="bucket" type="hinge" axis="0 1 0" damping="5000"/>
+          <joint name="bucket" type="hinge" axis="0 1 0" damping="{5000}"/>
           {_box("bucket", (BUCKET[0], 0, 0), BUCKET, DARK, arm)}
         </body>
       </body>
@@ -268,9 +269,9 @@ class ExcavatorWorld:
     {''.join(self._free_body(f"nb{n}", item, e_from_world, asset_mass, friction) for n, item in enumerate(neighbours))}
   </worldbody>
   <actuator>
-    <position joint="boom" kp="400000" forcerange="-1e6 1e6"/>
-    <position joint="stick" kp="200000" forcerange="-1e6 1e6"/>
-    <position joint="bucket" kp="100000" forcerange="-1e6 1e6"/>
+    <position joint="boom" kp="{400000 * servo_gain}" forcerange="{-torque_limits[0]} {torque_limits[0]}"/>
+    <position joint="stick" kp="{200000 * servo_gain}" forcerange="{-torque_limits[1]} {torque_limits[1]}"/>
+    <position joint="bucket" kp="{100000 * servo_gain}" forcerange="{-torque_limits[2]} {torque_limits[2]}"/>
   </actuator>
 </mujoco>"""
         self.model = mujoco.MjModel.from_xml_string(xml)
