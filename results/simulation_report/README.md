@@ -304,7 +304,15 @@ barrier is a MuJoCo rigid body.
 | --- | --- | --- | --- | --- | --- |
 | 0.63 m | 2.78 m² | 0.66 m³ | ~1e-16 m³ | 0.60 m | 3.6° (upright) |
 
-RELLIS_FIGURE_PLACEHOLDER
+![](rellis_dig_push.gif)
+
+*Left: the reconstruction along the captured trail. Right: the same camera path with the simulated excavator, the
+soil height field (trench and spoil pile) and the pushed barrier.*
+
+- **Views along the captured trail render well.** The road path in the figure is interpolated between captured views.
+- **Novel viewpoints off the trail do not.** A camera 5 m to the side of the trail, or a cab camera looking down,
+  sees ground the reconstruction only ever observed at grazing angles. It renders as grey fog. A machine-mounted
+  camera would need captures from the machine's own viewpoints, or a ground prior.
 
 **Findings:**
 - **Newly exposed soil has no photos.** The cut surface was never photographed, so its appearance has to be authored
@@ -315,7 +323,13 @@ RELLIS_FIGURE_PLACEHOLDER
 - **The ground must have the right depth** for the hidden-ground swap to work: only Gaussians near the true ground
   are removed. Without LiDAR depth the ground Gaussians are spread along the viewing rays, so the swap would be expected to leave some of them over the trench or cut holes elsewhere (not measured separately).
 - **Off-road needs denser Gaussians.** Grass and ruts are high-frequency. With the road-tuned densification threshold
-  the model had 155k Gaussians and LPIPS 0.60. RELLIS_DENSE_PLACEHOLDER
+  the model had 155k Gaussians and LPIPS 0.60.
+  - A 2.5× lower threshold gives 275k Gaussians and LPIPS 0.584.
+  - Per-image pose refinement, a learned SE(3) correction per view (`pose_refine`), makes it *worse* (LPIPS 0.667).
+  - Training views are as blurry as held-out ones (train PSNR 28.2, eval 28.1). So the model underfits views that
+    disagree with each other, and the cause is not poses. The likely causes are wind-blown grass and motion blur.
+    The real photos' own warp residual (9.5) is 2–3× nuScenes'.
+  - Handling this needs a per-image appearance/transient model, or masking vegetation from the loss.
 
 ### Construction-specific challenges: status
 
