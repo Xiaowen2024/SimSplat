@@ -11,6 +11,14 @@ and PyTorch, with no Nerfstudio dependency.
 
 ![](results/nuscenes_scene0916/editing/bus_removed_and_replaced.gif)
 
+**Simulation report:** [Neural rendering for an excavator simulator](results/simulation_report/README.md).
+It covers:
+- a benchmark on 7 scenes;
+- objects rebuilt as MuJoCo assets inside the neural scene;
+- a perception sim-to-real check;
+- a camera-driven closed loop;
+- failure modes, and where neural rendering should replace sim assets.
+
 ## Features
 
 - **Scene-graph model.**
@@ -131,6 +139,10 @@ Add a converter, not a parser:
 
 ## Results
 
+- [Simulation report](results/simulation_report/README.md):
+  - scene-0061 work zone with every visible barrier rebuilt as a MuJoCo asset;
+  - perception and closed-loop evaluation;
+  - a 7-scene fidelity benchmark.
 - [nuScenes scene-0916](results/nuscenes_scene0916/README.md): six-camera
   reconstruction (21.6 dB held-out PSNR), plus moving-actor removal and
   sim-asset replacement.

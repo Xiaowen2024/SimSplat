@@ -93,6 +93,9 @@ def main() -> None:
     parser.add_argument("--capacity", type=float, default=0.35, help="bucket capacity, m^3")
     parser.add_argument("--speed", type=float, default=0.8, help="m/s")
     parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--push-after", type=float, default=0.0, metavar="TRAVEL",
+                        help="after digging, lower the bucket in front of the barrier and push it this far (m); 0: no push")
+    parser.add_argument("--hit-height", type=float, default=0.6, help="push: bucket centre height / barrier height")
     args = parser.parse_args()
 
     import mujoco
@@ -127,10 +130,18 @@ def main() -> None:
                       (args.dump_x, above, False),  # over the spoil pile
                       ("dump", None, False),
                       (args.trench[1], above, False)]  # back
+    if args.push_after > 0:
+        # Interaction with the authored barrier: approach above it, lower in front of
+        # its near face, sweep through it (slowly), lift away.
+        front = args.standoff - world.reach - BUCKET[2] - 0.15
+        hit = surface + args.hit_height * world.height + BUCKET[0]
+        waypoints += [(front, above, False), (front, hit, False), ("slow", None, False),
+                      (front + args.push_after, hit, False), (front + args.push_after, above, False)]
     world.reset(np.array(waypoints[0][:2]))
     wrist = np.array(waypoints[0][:2], dtype=float)
     every = int(round(1.0 / (args.fps * world.dt)))
     bucket = world.model.geom("bucket").id
+    speed = args.speed
     frames, step = {"asset": [], "parts": [], "neighbours": [], "heights": [], "load": []}, 0
 
     def record() -> None:
@@ -147,13 +158,17 @@ def main() -> None:
         world_corners = corners @ rotation.T + centre
         soil.cut(centre[:2], 0.0, (BUCKET[2], BUCKET[1]), float(world_corners[:, 2].min()))
 
+    contacts = [False]
     record()
     for target in waypoints[1:]:
         if target[0] == "dump":
             soil.dump((args.dump_x, 0.0), radius=0.7)
             continue
+        if target[0] == "slow":
+            speed = 0.4 * args.speed  # pushing
+            continue
         goal = np.array(target[:2], dtype=float)
-        steps = max(1, int(np.linalg.norm(goal - wrist) / args.speed / world.dt))
+        steps = max(1, int(np.linalg.norm(goal - wrist) / speed / world.dt))
         start = wrist.copy()
         for i in range(1, steps + 1):
             world.step(start + (goal - start) * i / steps)
@@ -162,6 +177,7 @@ def main() -> None:
             step += 1
             if step % every == 0:
                 record()
+                contacts.append(world.touching())
         wrist = goal
     for _ in range(int(0.5 / world.dt)):
         world.step(wrist)
@@ -179,7 +195,10 @@ def main() -> None:
         "spoil_m3": float(np.maximum(soil.heights - soil.initial, 0).sum() * soil.cell_area),
         "volume_balance_m3": soil.volume_change() + soil.load_m3, "lidar_ground_points": ground_points,
         "barrier_displacement_m": float(np.linalg.norm(asset_poses[-1][:2, 3] - asset_poses[0][:2, 3])),
-        "first_contact_frame": None, "max_joint_tracking_error_rad": world.tracking_error(),
+        "pushed_m": args.push_after, "barrier_final_tilt_deg": float(np.degrees(np.arccos(np.clip(asset_poses[-1][2, 2], -1.0, 1.0)))),
+        "neighbours_moved_over_5cm": int(sum(np.linalg.norm(neighbour_poses[-1, n, :2, 3] - neighbour_poses[0, n, :2, 3]) > 0.05
+                                             for n in range(len(world.neighbours)))) if neighbour_poses is not None else 0,
+        "first_contact_frame": int(np.argmax(contacts)) if any(contacts) else None, "max_joint_tracking_error_rad": world.tracking_error(),
     }
     payload = world.payload(asset_poses, part_poses, summary, neighbour_poses)
     payload["label"] = "MuJoCo excavator digging"
