@@ -276,6 +276,19 @@ Scene 0061, 50k steps, same model otherwise:
 On RELLIS-3D (off-road, §2.2) the same loss takes depth AbsRel from 0.161 to **0.045** and δ < 1.25 from 71% to 97%,
 at −0.26 dB PSNR.
 
+![](lidar_depth_0061.jpg)
+
+*Scene 0061, held-out view. Top: photo and renders without / with the depth loss; they are almost the same. Bottom:
+LiDAR, then rendered depth without / with the loss (turbo colour map, 0–40 m). With photos only, the road has
+blotches nearer or farther than the surface: the "fog" that broke the asset fits. With LiDAR the road is a smooth
+gradient and the kerb line of barriers is a sharp depth edge.*
+
+![](lidar_depth_rellis.jpg)
+
+*RELLIS-3D trail. With photos only, the grass ground is patchy and its depth flickers between nearby values. With
+LiDAR it matches the scan. The RGB barely changes (the ruts are slightly crisper); the blur is the separate
+underfitting problem of §2.2.*
+
 **Trade-off:** about 0.3–0.4 dB PSNR for depth that is roughly 3–7× more accurate. For a simulator that is the right
 trade. Every downstream geometric use improves: asset fitting, localization, temporal consistency and the terrain
 surface. The photometric loss alone cannot see the error.
